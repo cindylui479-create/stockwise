@@ -1,0 +1,302 @@
+# {{ profile.name }} ({{ profile.code }}) 投资分析报告（伯克希尔范式）
+
+> 生成时间：{{ today }} ｜ 市场：{{ market_label }} ｜ 当前价：{{ format_price(profile.current_price, profile.currency) }}
+> 行业：{{ profile.industry or '—' }} ｜ 总市值：{{ format_money(profile.total_market_cap, profile.currency) }}
+
+---
+
+## 综合判断
+
+**{{ score.rating }}** （综合得分 {{ score.total }} / 100，安全边际：**{{ score.margin_of_safety }}**，
+评估口径：{% if score.industry_view == 'bank' %}银行业版{% elif score.industry_view == 'insurance' %}保险业版{% elif score.industry_view == 'growth' %}成长股版{% else %}默认（消费/制造）{% endif %}）
+
+| 维度 | 得分 | 满分 |
+|---|---:|---:|
+{% for k, v in score.dimensions.items() -%}
+| {{ k }} | {{ v }} | {{ score.dimension_caps[k] }} |
+{% endfor %}
+
+{% if score.vetoes -%}
+> ⚠️ **触发一票否决项**：
+{% for v in score.vetoes -%}
+> - {{ v }}
+{% endfor %}
+{%- endif %}
+
+{% if score.reasons -%}
+**关键支撑：**
+{% for r in score.reasons -%}
+- {{ r }}
+{% endfor %}
+{%- endif %}
+
+---
+
+## 巴菲特检查清单
+
+| 项目 | 结果 | 备注 |
+|---|:---:|---|
+{% for item, ok, note in score.checklist -%}
+| {{ item }} | {% if ok %}✅{% else %}❌{% endif %} | {{ note }} |
+{% endfor %}
+
+---
+
+## 一、公司速览与主业
+
+{% if llm and llm.main_business -%}
+{{ llm.main_business }}
+{% else -%}
+（未启用 LLM 解读）
+{%- endif %}
+
+---
+
+## 二、护城河分析（{{ score.dimensions['护城河'] }} / {{ score.dimension_caps['护城河'] }}）
+
+{% if llm and llm.moat_analysis -%}
+{{ llm.moat_analysis }}
+{% else -%}
+（未启用 LLM 解读，仅按财务指标判断 — 参见上方检查清单）
+{%- endif %}
+
+### 财务证据（近 5 年）
+
+| 报告期 | 营收 | 净利润 | ROE | 毛利率 | 净利率 |
+|---|---:|---:|---:|---:|---:|
+{% for fp in financials.annual[:5] -%}
+| {{ fp.period }} | {{ format_money(fp.revenue, profile.currency) }} | {{ format_money(fp.net_profit, profile.currency) }} | {{ format_pct(fp.roe) }} | {{ format_pct(fp.gross_margin) }} | {{ format_pct(fp.net_margin) }} |
+{% endfor %}
+
+---
+
+## 三、盈利质量与资本配置（{{ score.dimensions['盈利质量'] + score.dimensions['资本配置'] }} / {{ score.dimension_caps['盈利质量'] + score.dimension_caps['资本配置'] }}）
+
+{% set has_cf = financials.annual and financials.annual[0].operating_cashflow is not none -%}
+{% if has_cf -%}
+| 报告期 | 经营现金流 | 净利润 | CFO/净利 | 每股 FCF | 资产负债率 |
+|---|---:|---:|---:|---:|---:|
+{% for fp in financials.annual[:5] -%}
+| {{ fp.period }} | {{ format_money(fp.operating_cashflow, profile.currency) }} | {{ format_money(fp.net_profit, profile.currency) }} | {% if fp.operating_cashflow is not none and fp.net_profit and fp.net_profit > 0 %}{{ "%.2f" | format(fp.operating_cashflow / fp.net_profit) }}{% else %}—{% endif %} | {{ format_num(fp.fcf_per_share) }} | {{ format_pct(fp.debt_ratio) }} |
+{% endfor %}
+{%- endif %}
+
+{% if dividends.history -%}
+**分红记录**：连续派息 **{{ dividends.consecutive_years }}** 年（最近 5 次）
+
+| 年份 | 每 10 股派息 |
+|---|---:|
+{% for r in dividends.history[:5] -%}
+| {{ r.year }} | {{ "%.2f" | format(r.cash_per_10_shares) }} 元 |
+{% endfor %}
+{%- endif %}
+
+---
+
+## 四、长期增长（{{ score.dimensions['长期增长'] }} / {{ score.dimension_caps['长期增长'] }}）
+
+最近 10 年（或可用最长期间）的复合增长率，按检查清单中给出的阈值评分。详见上方"巴菲特检查清单"。
+
+---
+
+## 五、内在价值估算 与 安全边际（{{ score.dimensions['安全边际'] }} / {{ score.dimension_caps['安全边际'] }}）
+
+{% if intrinsic.industry_view == 'bank' -%}
+> 评估口径：**银行业版**（巴菲特实战标准：低 P/B + 高 ROE + 稳定派息 = 长期复利）
+{% elif intrinsic.industry_view == 'insurance' -%}
+> 评估口径：**保险业版**（P/B + 股息率 + 净利稳定性）
+{% elif intrinsic.industry_view == 'growth' -%}
+> 评估口径：**成长股版**（林奇 GARP：PEG + 隐含回报 + PS÷增长率 + DCF 含增长）
+{% else -%}
+> 评估口径：**默认**（消费/制造：FCF Yield + Graham + OE×12 + DCF 含增长）
+{%- endif %}
+
+| 估值口径 | 当前 | 阈值 | 是否通过 |
+|---|---:|---:|:---:|
+{% for g in intrinsic.gates -%}
+| {{ g.label }} | {{ g.current_str }} | {{ g.threshold_str }} | {% if g.passed %}✅{% else %}❌{% endif %} |
+{% endfor -%}
+| 当前市值 | {{ format_money(intrinsic.market_cap, profile.currency) }} | — | — |
+
+**安全边际：{{ intrinsic.margin_of_safety }}**（{{ intrinsic.total_gates() }} 道关通过 {{ intrinsic.passes_count() }} / {{ intrinsic.total_gates() }}）
+
+{% if llm and llm.intrinsic_value_view -%}
+**LLM 视角的内在价值判断：**
+
+{{ llm.intrinsic_value_view }}
+{%- endif %}
+
+---
+
+## 六、如果你买下整家公司
+
+> 巴菲特视角：股票不是数字，是公司的所有权碎片。
+
+{% if buyout.market_cap and buyout.annual_profit -%}
+- 买下整家公司需付出：**{{ format_money(buyout.market_cap, profile.currency) }}**
+- 公司年均净利润（近 3 年）：**{{ format_money(buyout.annual_profit, profile.currency) }}**
+- 按净利润口径回本期：**{{ "%.1f" | format(buyout.payback_by_profit) }} 年**
+{% if buyout.payback_by_fcf -%}
+- 公司年均自由现金流（近 3 年）：**{{ format_money(buyout.annual_fcf, profile.currency) }}**
+- 按 FCF 口径回本期：**{{ "%.1f" | format(buyout.payback_by_fcf) }} 年**
+{%- endif %}
+{% else -%}
+（数据不足以估算）
+{%- endif %}
+
+---
+
+## 七、管理层质量（{{ score.dimensions['管理层质量'] }} / {{ score.dimension_caps['管理层质量'] }}）
+
+{% if llm and llm.management_note -%}
+**LLM 评分：{{ llm.management_quality }}/5** —— {{ llm.management_note }}
+{% else -%}
+（未启用 LLM）
+{%- endif %}
+
+---
+
+## 八、业务可理解性（{{ score.dimensions['业务可理解性'] }} / {{ score.dimension_caps['业务可理解性'] }}）
+
+{% if llm and llm.understandability_note -%}
+**LLM 评分：{{ llm.business_understandability }}/5** —— {{ llm.understandability_note }}
+{% else -%}
+（未启用 LLM）
+{%- endif %}
+
+---
+
+## 九、Munger 反向思考：什么会让这家公司死？
+
+{% if llm and llm.inversion -%}
+{{ llm.inversion }}
+{% else -%}
+（未启用 LLM；无定性反向分析）
+{%- endif %}
+
+---
+
+## 十、风险与警示
+
+{% if score.flags -%}
+{% for f in score.flags -%}
+- {{ f }}
+{% endfor %}
+{% else -%}
+- *未发现明显告警。*
+{%- endif %}
+
+---
+
+## 十一、综合判断
+
+{% if llm and llm.verdict -%}
+{{ llm.verdict }}
+{% elif llm and llm.intrinsic_value_view -%}
+*（LLM 未给出独立的 verdict 段落，复用其内在价值判断作为总结）*
+
+{{ llm.intrinsic_value_view }}
+{% else -%}
+未启用 LLM。规则得分 {{ score.total }} 分，评级：**{{ score.rating }}**，安全边际：{{ score.margin_of_safety }}。
+{%- endif %}
+
+---
+
+## 附 A：股东结构 & 持仓变动
+
+{% if holders.skipped or holders.error -%}
+*股东数据缺失：{{ holders.error or '已跳过' }}*
+{% elif holders.top_holders -%}
+**数据源：{{ holders.source }} ｜ 报告期：{{ holders.report_date }}**
+
+| # | 股东名称 | 性质 | 占流通 | 变动 |
+|---|---|---|---:|---|
+{% for r in holders.top_holders -%}
+| {{ loop.index }} | {{ r.name }} | {{ r.nature or '—' }} | {{ "%.2f" | format(r.pct) }}% | {{ r.change or '—' }}{% if r.change_pct is not none %} ({{ "%+.1f" | format(r.change_pct) }}%){% endif %} |
+{% endfor %}
+
+> 重点关注："香港中央结算"= 北上资金；"证券投资基金"= 公募；"控股股东"自身增减是核心信号。
+{% elif holders.insider_pct is not none -%}
+**数据源：{{ holders.source }}**
+
+| 项目 | 值 |
+|---|---:|
+| 内部人持股 | {{ "%.1f" | format(holders.insider_pct) }}% |
+| 机构持股 | {{ "%.1f" | format(holders.institution_pct or 0) }}% |
+| 机构数量 | {{ holders.institution_count or '—' }} |
+
+> *yfinance 港股机构数据偏美股 13F，本地基金覆盖弱，仅作总览参考。*
+{% else -%}
+*无股东数据*
+{%- endif %}
+
+---
+
+## 附 B：治理事件（巨潮近 180 天）
+
+{% if governance and governance.skipped -%}
+*治理事件抓取已跳过：{{ governance.error or '—' }}*
+{% elif governance and governance.error -%}
+*抓取失败：{{ governance.error }}*
+{% elif governance and (governance.high or governance.medium) -%}
+{% if governance.high -%}
+### 🔴 红旗事件（high）—— 监管/诉讼/失信类，建议重点核查
+| 日期 | 类型 | 标题 |
+|---|---|---|
+{% for e in governance.high -%}
+| {{ e.date }} | {{ e.category }} | {{ e.title }} |
+{% endfor %}
+{% endif %}
+{% if governance.medium -%}
+### 🟡 需关注（medium）—— 关联交易/质押/担保/减持
+| 日期 | 类型 | 标题 |
+|---|---|---|
+{% for e in governance.medium -%}
+| {{ e.date }} | {{ e.category }} | {{ e.title }} |
+{% endfor %}
+{% endif %}
+
+> 数据来源：巨潮资讯网（cninfo.com.cn）。已过滤年报/季报等例行公告。
+{% else -%}
+✅ 近 180 天**无重大治理事件**（巨潮披露）。
+{%- endif %}
+
+---
+
+## 附 C：数据可靠性校验
+
+{% set v = score.validation if score.validation is defined else None -%}
+{% set validation = validation if validation is defined else None -%}
+{% if validation and validation.skipped -%}
+*副源校验已跳过：{{ validation.error or '—' }}*
+{% elif validation and validation.error -%}
+*副源校验失败：{{ validation.error }}*
+{% elif validation and validation.checked_fields > 0 -%}
+副源：**{{ validation.source }}** ｜ 已对比字段数：{{ validation.checked_fields }} ｜
+{% if validation.has_warnings -%}
+⚠️ **{{ validation.major_diffs | length }} 处显著差异（>10%）**：
+| 字段 | 报告期 | 主源 (akshare) | 副源 (baostock) | 差异 |
+|---|---|---:|---:|---:|
+{% for d in validation.major_diffs -%}
+| {{ d.field }} | {{ d.period }} | {{ "%.2f" | format(d.primary) }} | {{ "%.2f" | format(d.secondary) }} | {{ "%.1f" | format(d.pct_diff) }}% |
+{% endfor %}
+> 显著差异不一定代表数据错误，可能是统计口径不同（如归母 vs 含少数股东、税前 vs 税后）。
+> 建议在做关键决策前到 [巨潮资讯网](http://www.cninfo.com.cn) 查阅原始财报核对。
+{% else -%}
+✅ 主副两源数据一致（所有差异 ≤10%），可放心使用。
+{%- endif %}
+{% else -%}
+*无校验信息*
+{%- endif %}
+
+---
+
+## 附 D：近期相关新闻
+
+{% for n in news -%}
+- **{{ n.publish_time }}** — {{ n.title }}
+{% endfor %}
+
+---
+
+> **免责声明**：本报告由程序自动生成，数据来自 akshare 等公开渠道，仅供参考，不构成投资建议。投资有风险，决策需谨慎。
