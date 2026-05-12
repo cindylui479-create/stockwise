@@ -2,6 +2,7 @@
 name = "stockwise"
 version = "0.3.0"
 description = "巴菲特/林奇范式 A 股 + 港股价值投资分析工具：4 类行业 profile + 5 数据源 + LLM 定性分析"
+license = { text = "MIT" }
 requires-python = ">=3.10"
 dependencies = [
     "akshare>=1.18",
