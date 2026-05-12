@@ -27,8 +27,9 @@ from stockwise.data.models import (
 @dataclass
 class ScoreResult:
     total: int
-    rating: str
-    margin_of_safety: str
+    rating: str                       # 质量评级
+    action: str = "观察"              # 行动建议（4 档 + 否决）
+    margin_of_safety: str = "未知"
     industry_view: str = "default"
     dimensions: dict[str, int] = field(default_factory=dict)
     dimension_caps: dict[str, int] = field(default_factory=dict)
@@ -79,6 +80,7 @@ def score(snapshot: StockSnapshot,
     }
     total = sum(dims.values())
     rating = _rating(total, iv.margin_of_safety, vetoes)
+    action = _action(total, iv.discount, vetoes, snapshot.governance)
 
     flags = [*moat_flags, *quality_flags, *capital_flags, *growth_flags, *safety_flags]
     if biz_note:
@@ -91,6 +93,7 @@ def score(snapshot: StockSnapshot,
     return ScoreResult(
         total=total,
         rating=rating,
+        action=action,
         margin_of_safety=iv.margin_of_safety,
         industry_view=view,
         dimensions=dims,
@@ -617,21 +620,44 @@ def _score_growth(fin: Financials, view: str = "default"):
 # ---------------------------------------------------------------------------
 
 def _score_safety(iv: IntrinsicValue):
+    """安全边际：按 discount 连续映射 0-20 分。
+
+    映射区间：discount ∈ [-30%, +50%] → pts ∈ [0, 20]
+      discount ≥ +50%   → 20（深度低估）
+      +30%               → 15
+      +10%               → 10
+      -10%               → 5
+      -30%               → 0
+    """
     flags: list[str] = []
     reasons: list[str] = []
     checklist: list[tuple[str, bool, str]] = []
-    pts = 0
-    per_gate = 20 // max(1, iv.total_gates() or 4)
 
+    # 仍展示每道关的通过情况（信息保留）
     for gate in iv.gates:
         if gate.passed:
-            pts += per_gate
-            reasons.append(f"{gate.label}（当前 {gate.current_str}）")
             checklist.append((gate.label, True, gate.current_str))
         else:
             checklist.append((gate.label, False, gate.current_str))
-            flags.append(f"{gate.label} 未通过：{gate.current_str}")
-    return min(pts, 20), flags, reasons, checklist
+
+    if iv.discount is None:
+        return 5, ["内在价值无法估算（数据缺失），给中位 5 分"], [], checklist
+
+    d = iv.discount
+    # 线性映射 [-30, 50] → [0, 20]，clamp 边界
+    pts = (d + 30) / 80 * 20
+    pts = max(0, min(20, round(pts)))
+
+    if d >= 30:
+        reasons.append(f"安全边际充足：当前价格相对内在价值折价 {d:.0f}%（fair ≈ {iv.fair_value/1e8:.0f} 亿）")
+    elif d >= 10:
+        reasons.append(f"安全边际一般：折价 {d:.0f}%（fair ≈ {iv.fair_value/1e8:.0f} 亿）")
+    elif d >= -10:
+        flags.append(f"安全边际不足：当前价格接近内在价值（差 {d:+.0f}%）")
+    else:
+        flags.append(f"估值偏贵：当前价格高出内在价值 {-d:.0f}%（fair ≈ {iv.fair_value/1e8:.0f} 亿）")
+
+    return pts, flags, reasons, checklist
 
 
 # ---------------------------------------------------------------------------
@@ -654,21 +680,64 @@ def _score_management(score_0_5: Optional[int]) -> tuple[int, str]:
 # 评级标签（伯克希尔风格）
 # ---------------------------------------------------------------------------
 
-def _rating(total: int, mos: str, vetoes: list[str]) -> str:
+def _action(total: int, discount: Optional[float], vetoes: list[str],
+            governance) -> str:
+    """独立于质量评级的"具体行动建议"。
+
+    决策矩阵：
+      - 一票否决 → "避免，不研究"
+      - 质量 < 50 → "避免"
+      - 质量 50-70 → "观察，不建议新仓"
+      - 质量 ≥ 70 + 折价 ≥ 30% → "可以入场（折价充足）"
+      - 质量 ≥ 70 + 折价 10-30% → "可以入场（谨慎，折价一般）"
+      - 质量 ≥ 70 + 折价 -10~10% → "已持有可继续，新仓需等"
+      - 质量 ≥ 70 + 折价 < -10% → "等待回调（估值偏贵）"
+    若 governance 含红旗事件，所有建议追加 "警惕治理事件"
     """
-      ≥85 + 充足  → 值得长期持有
-      ≥85 + 其他  → 优质但偏贵
-      70-84       → 质量好但有瑕疵
-      <70         → 未达伯克希尔标准
-      命中一票否决 → 避免（独立于得分）
+    if vetoes:
+        base = "避免（触发一票否决）"
+    elif total < 50:
+        base = "避免（基本面不达标）"
+    elif total < 70:
+        base = "观察，不建议新仓"
+    elif discount is None:
+        base = "观察（估值数据不全）"
+    elif discount >= 30:
+        base = "可以入场（折价充足）"
+    elif discount >= 10:
+        base = "可以入场（谨慎，折价一般）"
+    elif discount >= -10:
+        base = "已持有可继续，新仓需等"
+    else:
+        base = "等待回调（估值偏贵）"
+
+    if governance and hasattr(governance, "has_red_flags") and governance.has_red_flags:
+        base = f"{base} ⚠ 留意治理红旗"
+    return base
+
+
+def _rating(total: int, mos: str, vetoes: list[str]) -> str:
+    """5 档标签 + 否决档：
+
+      ≥85 + 充足          → 值得长期持有
+      ≥85 + 一般          → 优质合理估值
+      ≥85 + 不足/偏贵     → 优质但偏贵
+      70-84 + 充足/一般   → 质量好且估值合理
+      70-84 + 不足/偏贵   → 质量好但有瑕疵
+      <70                 → 未达伯克希尔标准
+      一票否决            → 避免
     """
     if vetoes:
         return "避免"
-    if total >= 85 and mos == "充足":
-        return "值得长期持有"
     if total >= 85:
+        if mos == "充足":
+            return "值得长期持有"
+        if mos == "一般":
+            return "优质合理估值"
         return "优质但偏贵"
     if total >= 70:
+        if mos in ("充足", "一般"):
+            return "质量好且估值合理"
         return "质量好但有瑕疵"
     return "未达伯克希尔标准"
 

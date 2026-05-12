@@ -219,7 +219,11 @@ _A_INDICATOR_MAP = {
 
 
 def _a_financials(code: str, years: int = 10) -> Financials:
-    df = _retry(lambda: ak.stock_financial_abstract(symbol=code), swallow=True)
+    from stockwise.data.cache import cached_call, TTL_FINANCIALS
+    df = cached_call(
+        "akshare:stock_financial_abstract", code, TTL_FINANCIALS,
+        lambda: _retry(lambda: ak.stock_financial_abstract(symbol=code), swallow=True),
+    )
     if df is None or df.empty:
         return Financials()
 
@@ -290,8 +294,12 @@ def _a_valuation(code: str) -> Valuation:
 
 def _a_dividends(code: str, fin: Financials) -> DividendInfo:
     """拉历史分红，结合财报算连续派息年数 + TTM 派息合计。"""
+    from stockwise.data.cache import cached_call, TTL_DIVIDENDS
     try:
-        df = ak.stock_history_dividend_detail(symbol=code, indicator="分红")
+        df = cached_call(
+            "akshare:stock_history_dividend_detail", code, TTL_DIVIDENDS,
+            lambda: ak.stock_history_dividend_detail(symbol=code, indicator="分红"),
+        )
     except Exception:
         return DividendInfo()
     if df is None or df.empty:
@@ -572,21 +580,28 @@ _GROWTH_INDUSTRY_KEYS = (
     "software", "internet", "semiconductors", "biotechnology", "pharmaceutical",
 )
 
+# 周期股关键字（用 Shiller PE 替代静态 PE，避免周期顶低 PE 陷阱）
+_CYCLICAL_INDUSTRY_KEYS = (
+    "煤炭", "钢铁", "黑色金属", "石油", "天然气", "采矿", "采选",
+    "有色金属", "稀有金属", "稀土",
+    "化学原料", "化学纤维", "基础化工",
+    "造纸", "水泥", "玻璃", "建材",
+    "航运", "港口", "运输",  # 航运周期；港口 / 公路较稳但姑且归类
+    # 英文
+    "steel", "mining", "oil", "gas", "metals", "shipping", "cement",
+)
+
 # 排除：强周期/资源/传统行业不归 growth，即使 CAGR 暂时高也只是周期上行
-_NON_GROWTH_KEYS = (
-    "煤炭", "钢铁", "石油", "天然气", "有色金属", "稀有金属",
+_NON_GROWTH_KEYS = _CYCLICAL_INDUSTRY_KEYS + (
     "房地产", "建筑", "农林牧渔", "渔业", "畜牧",
     "银行", "保险", "证券", "金融",
 )
 
 
 def classify_industry_view(industry: Optional[str], fin: Optional["Financials"] = None) -> str:
-    """映射到 default / bank / insurance / growth。
+    """映射到 default / bank / insurance / growth / cyclical。
 
-    growth 识别两条路径：
-      A. 行业关键字属于高研发行业 AND 营收 5 年 CAGR ≥ 15%
-      B. 营收 5 年 CAGR ≥ 25% AND 行业不在强周期/金融/资源类（直接由财务特征归 growth）
-    金融业（bank/insurance）优先级最高。
+    优先级：金融业 > 周期股 > 成长股 > 默认。
     """
     if not industry:
         return "default"
@@ -596,14 +611,18 @@ def classify_industry_view(industry: Optional[str], fin: Optional["Financials"] 
     if "保险" in industry or "insurance" in s:
         return "insurance"
 
+    # 周期股：资源/原材料/运输等
+    if any(k.lower() in s for k in _CYCLICAL_INDUSTRY_KEYS):
+        return "cyclical"
+
     cagr = _industry_rev_cagr(fin)
 
-    # 路径 A：行业 + CAGR ≥ 15%
+    # growth A：行业 + CAGR ≥ 15%
     is_growth_industry = any(k.lower() in s for k in _GROWTH_INDUSTRY_KEYS)
     if is_growth_industry and cagr is not None and cagr >= 0.15:
         return "growth"
 
-    # 路径 B：纯财务特征 — CAGR ≥ 25% 且不在强周期/资源类
+    # growth B：纯财务特征 — CAGR ≥ 25% 且不在排除类
     if cagr is not None and cagr >= 0.25:
         if not any(k in industry for k in _NON_GROWTH_KEYS):
             return "growth"
@@ -640,25 +659,45 @@ def compute_intrinsic_value(profile: CompanyProfile, fin: Financials, val: Valua
         iv = _iv_insurance(profile, fin, val, dividends)
     elif view == "growth":
         iv = _iv_growth(profile, fin, val)
+    elif view == "cyclical":
+        iv = _iv_cyclical(profile, fin, val, dividends)
     else:
         iv = _iv_default(profile, fin, val)
     iv.industry_view = view
     iv.market_cap = profile.total_market_cap
-    iv.margin_of_safety = _classify_margin(iv.passes_count(), iv.total_gates())
+
+    # 综合内在价值 = 多口径 fair_value 的中位数（保守视角，剔除离群值）
+    fair_values = [g.fair_value for g in iv.gates if g.fair_value is not None and g.fair_value > 0]
+    if fair_values and profile.total_market_cap:
+        fair_values.sort()
+        n = len(fair_values)
+        # 中位数
+        if n % 2 == 1:
+            iv.fair_value = fair_values[n // 2]
+        else:
+            iv.fair_value = (fair_values[n // 2 - 1] + fair_values[n // 2]) / 2
+        iv.discount = (iv.fair_value - profile.total_market_cap) / iv.fair_value * 100
+
+    iv.margin_of_safety = _classify_margin_by_discount(iv.discount)
     return iv
 
 
-def _classify_margin(passed: int, total: int) -> str:
-    if total == 0:
+def _classify_margin_by_discount(discount: Optional[float]) -> str:
+    """按折扣率分档：
+      ≥ 30%   → 充足
+      10-30%  → 一般
+      -10-10% → 不足
+      < -10%  → 偏贵
+    """
+    if discount is None:
         return "未知"
-    ratio = passed / total
-    if ratio >= 0.75:
+    if discount >= 30:
         return "充足"
-    if ratio >= 0.50:
+    if discount >= 10:
         return "一般"
-    if ratio > 0:
+    if discount >= -10:
         return "不足"
-    return "不足"
+    return "偏贵"
 
 
 # ---- 默认体系：FCF Yield / Graham / OE×12 / DCF ----
@@ -669,13 +708,14 @@ def _iv_default(profile: CompanyProfile, fin: Financials, val: Valuation) -> Int
     latest = fin.latest()
     market_cap = profile.total_market_cap
 
-    # 1. FCF Yield —— 用近 3 年平均，避免单年异常数据（如美的 2025 一次性投资支出）
+    # 1. FCF Yield —— 用近 3 年平均
     fcf_yield: Optional[float] = None
+    avg_fcf_total: Optional[float] = None
     fcf_series = [p.fcf_per_share for p in fin.annual[:3] if p.fcf_per_share is not None]
     if fcf_series and shares and market_cap:
         avg_fcf_per_share = sum(fcf_series) / len(fcf_series)
-        fcf_yield = avg_fcf_per_share * shares / market_cap * 100
-    # 同时给最新一年 FCF 总额方便报告展示
+        avg_fcf_total = avg_fcf_per_share * shares
+        fcf_yield = avg_fcf_total / market_cap * 100
     if latest and latest.fcf_per_share is not None and shares:
         latest.free_cashflow = latest.fcf_per_share * shares
     iv.gates.append(ValueGate(
@@ -683,21 +723,28 @@ def _iv_default(profile: CompanyProfile, fin: Financials, val: Valuation) -> Int
         current_str=f"{fcf_yield:.2f}%" if fcf_yield is not None else "—",
         threshold_str="≥ 6%",
         passed=fcf_yield is not None and fcf_yield >= FCF_YIELD_THRESHOLD,
+        # 合理市值 = FCF / 阈值收益率（即 P/FCF = 1/yield = 16.67）
+        fair_value=avg_fcf_total / (FCF_YIELD_THRESHOLD / 100) if avg_fcf_total else None,
     ))
 
     # 2. Graham PE × PB（ROE 调整）
     graham_pe_pb: Optional[float] = None
     threshold: Optional[float] = None
+    graham_fair: Optional[float] = None
     if val.pe_ttm and val.pb:
         graham_pe_pb = val.pe_ttm * val.pb
         roes = [p.roe for p in fin.annual[:5] if p.roe is not None]
         roe_avg = sum(roes) / len(roes) if roes else None
         threshold = _graham_threshold(roe_avg)
+        # 合理市值 = 当前市值 × (阈值 / 当前 PE×PB)
+        if graham_pe_pb > 0 and market_cap:
+            graham_fair = market_cap * threshold / graham_pe_pb
     iv.gates.append(ValueGate(
         label=f"Graham PE×PB ≤ {threshold:.0f}（ROE 调整）" if threshold else "Graham PE×PB",
         current_str=f"{graham_pe_pb:.1f}" if graham_pe_pb is not None else "—",
         threshold_str=f"≤ {threshold:.0f}" if threshold else "—",
         passed=graham_pe_pb is not None and threshold is not None and graham_pe_pb <= threshold,
+        fair_value=graham_fair,
     ))
 
     # 3. Owner Earnings × 12
@@ -713,6 +760,7 @@ def _iv_default(profile: CompanyProfile, fin: Financials, val: Valuation) -> Int
         current_str=f"{oe_value/1e8:.0f} 亿" if oe_value else "—",
         threshold_str=f"≥ 市值",
         passed=bool(oe_value and market_cap and oe_value >= market_cap),
+        fair_value=oe_value,
     ))
 
     # 4. DCF Gordon 增长
@@ -729,6 +777,7 @@ def _iv_default(profile: CompanyProfile, fin: Financials, val: Valuation) -> Int
         current_str=f"{dcf_value/1e8:.0f} 亿" if dcf_value else "—",
         threshold_str=f"≥ 市值",
         passed=bool(dcf_value and market_cap and dcf_value >= market_cap),
+        fair_value=dcf_value,
     ))
     return iv
 
@@ -762,57 +811,94 @@ def _iv_growth(profile: CompanyProfile, fin: Financials, val: Valuation) -> Intr
     rev_series = [p.revenue for p in fin.annual[:5] if p.revenue is not None]
     rev_cagr = _cagr_pct(rev_series)
 
-    # 1. PEG (PE / 净利增长率) ≤ 1.5
-    peg: Optional[float] = None
-    if pe and pe > 0 and profit_cagr and profit_cagr > 0:
-        peg = pe / profit_cagr
+    latest_profit = fin.annual[0].net_profit if fin.annual else None
+    latest_revenue = fin.annual[0].revenue if fin.annual else None
+
+    # 用更保守的"未来增长率" = min(历史 CAGR ÷ 2, 历史 CAGR, 10%)
+    # 避免按 30%+ 历史 CAGR 算 PEG 而高估未来
+    conservative_g = None
+    if profit_cagr is not None:
+        conservative_g = min(profit_cagr / 2, profit_cagr, 10.0) if profit_cagr > 0 else 0
+
+    # 1. PEG ≤ 1.5
+    # 关键改造：用「保守 PEG」= PE / conservative_g 来判通过，避免按 30%+ 历史 CAGR
+    # 算 PEG 而过度乐观；同时报告里同时展示乐观/保守两个值
+    peg_optimistic: Optional[float] = None
+    peg_conservative: Optional[float] = None
+    peg_fair: Optional[float] = None
+    if pe and pe > 0:
+        if profit_cagr and profit_cagr > 0:
+            peg_optimistic = pe / profit_cagr
+        if conservative_g and conservative_g > 0:
+            peg_conservative = pe / conservative_g
+            if latest_profit:
+                peg_fair = latest_profit * (GROWTH_PEG_THRESHOLD * conservative_g)
+    if peg_conservative is not None and peg_optimistic is not None:
+        current_str = f"乐观 {peg_optimistic:.2f} / 保守 {peg_conservative:.2f}"
+    elif peg_conservative is not None:
+        current_str = f"{peg_conservative:.2f}"
+    elif peg_optimistic is not None:
+        current_str = f"{peg_optimistic:.2f}"
+    else:
+        current_str = "—"
     iv.gates.append(ValueGate(
-        label="PEG ≤ 1.5",
-        current_str=f"{peg:.2f}" if peg is not None else "—",
+        label="PEG ≤ 1.5（按保守 g = 历史 CAGR÷2 判定）",
+        current_str=current_str,
         threshold_str="≤ 1.5",
-        passed=peg is not None and peg <= GROWTH_PEG_THRESHOLD,
+        passed=peg_conservative is not None and peg_conservative <= GROWTH_PEG_THRESHOLD,
+        fair_value=peg_fair,
     ))
 
-    # 2. 5 年隐含年化回报 = (1/PE + g) ≥ 8%
+    # 2. 5 年隐含年化回报 = (1/PE + g) ≥ 8% → 合理 PE = 1/(0.08 - g)
     implied: Optional[float] = None
+    implied_fair: Optional[float] = None
     if pe and pe > 0 and profit_cagr is not None:
         implied = 100.0 / pe + profit_cagr
+        if latest_profit and conservative_g is not None:
+            g_dec = conservative_g / 100
+            ret = GROWTH_IMPLIED_RET_THRESHOLD / 100
+            if ret > g_dec:
+                fair_pe = 1 / (ret - g_dec)
+                implied_fair = latest_profit * fair_pe
     iv.gates.append(ValueGate(
         label="(1/PE + g) 隐含年化回报 ≥ 8%",
         current_str=f"{implied:.1f}%" if implied is not None else "—",
         threshold_str="≥ 8%",
         passed=implied is not None and implied >= GROWTH_IMPLIED_RET_THRESHOLD,
+        fair_value=implied_fair,
     ))
 
-    # 3. PS / 营收增长率 ≤ 0.5
+    # 3. PS / 营收增长率 ≤ 0.5 → 合理 PS = 0.5 × g, 合理市值 = 营收 × 合理 PS
     ps_per_g: Optional[float] = None
+    ps_fair: Optional[float] = None
     if val.ps and rev_cagr and rev_cagr > 0:
         ps_per_g = val.ps / rev_cagr
+        if latest_revenue:
+            conservative_rev_g = min(rev_cagr / 2, rev_cagr, 10.0)
+            ps_fair = latest_revenue * (GROWTH_PS_PER_G_THRESHOLD * conservative_rev_g)
     iv.gates.append(ValueGate(
         label="PS / 营收 CAGR ≤ 0.5",
         current_str=f"{ps_per_g:.3f}" if ps_per_g is not None else "—",
         threshold_str="≤ 0.5",
         passed=ps_per_g is not None and ps_per_g <= GROWTH_PS_PER_G_THRESHOLD,
+        fair_value=ps_fair,
     ))
 
-    # 4. DCF 含增长（用净利 g + 当前净利做 proxy；FCF/股 数据可能差或为负）
+    # 4. DCF 含增长（用保守 g）
     dcf_value: Optional[float] = None
     g_used = 0.0
-    latest_profit = fin.annual[0].net_profit if fin.annual else None
     if latest_profit and latest_profit > 0 and market_cap:
-        # 成长股 g 上限放宽到 15%（vs 默认 5%），但仍 < r=8% 时模型才有意义
-        # 若 g ≥ r 则用 g=r-1% 兜底（永续增长不能超过折现率）
-        if profit_cagr is not None and profit_cagr > 0:
-            g_used = min(profit_cagr / 100, 0.15)
-        annual_oe = latest_profit
+        if conservative_g is not None and conservative_g > 0:
+            g_used = min(conservative_g / 100, 0.10)
         if g_used >= DCF_DISCOUNT_RATE:
             g_used = DCF_DISCOUNT_RATE - 0.01
-        dcf_value = annual_oe * (1 + g_used) / (DCF_DISCOUNT_RATE - g_used)
+        dcf_value = latest_profit * (1 + g_used) / (DCF_DISCOUNT_RATE - g_used)
     iv.gates.append(ValueGate(
-        label=f"DCF 含增长 ≥ 市值（g={g_used*100:.1f}%, r=8%）",
+        label=f"DCF 含增长 ≥ 市值（保守 g={g_used*100:.1f}%, r=8%）",
         current_str=f"{dcf_value/1e8:.0f} 亿" if dcf_value else "—",
         threshold_str="≥ 市值",
         passed=bool(dcf_value and market_cap and dcf_value >= market_cap),
+        fair_value=dcf_value,
     ))
     return iv
 
@@ -829,6 +915,84 @@ def _cagr_pct(series: list[float]) -> Optional[float]:
     return ((latest / earliest) ** (1 / n) - 1) * 100
 
 
+# ---- 周期股体系：Shiller PE / P/B / 股息率 / 历史中位 PE ----
+# Shiller CAPE 法：用过去 10 年平均 EPS 替代当前 EPS，避免周期顶部低 PE 陷阱
+
+CYCLICAL_SHILLER_PE_THRESHOLD = 15.0   # Shiller PE ≤ 15 视为合理（周期股门槛严）
+CYCLICAL_PB_THRESHOLD = 1.5            # P/B ≤ 1.5
+CYCLICAL_DIV_YIELD_THRESHOLD = 4.0     # 周期股需要高分红弥补盈利波动
+
+
+def _iv_cyclical(profile: CompanyProfile, fin: Financials, val: Valuation,
+                  div: Optional[DividendInfo]) -> IntrinsicValue:
+    """周期股估值：用 10 年平均 EPS 平滑掉周期峰谷。"""
+    iv = IntrinsicValue()
+    market_cap = profile.total_market_cap
+    shares = profile.shares
+    pe = val.pe_ttm
+    pb = val.pb
+    latest = fin.latest()
+    roe = latest.roe if latest else None
+
+    # 1. Shiller PE（10 年平均 EPS）≤ 15
+    shiller_pe: Optional[float] = None
+    shiller_fair: Optional[float] = None
+    profits = [p.net_profit for p in fin.annual if p.net_profit is not None]
+    if len(profits) >= 5 and shares and market_cap:
+        avg_profit = sum(profits) / len(profits)
+        if avg_profit > 0:
+            shiller_pe = market_cap / avg_profit
+            shiller_fair = avg_profit * CYCLICAL_SHILLER_PE_THRESHOLD
+    iv.gates.append(ValueGate(
+        label=f"Shiller PE（{len(profits)} 年均值）≤ 15",
+        current_str=f"{shiller_pe:.1f}" if shiller_pe is not None else "—",
+        threshold_str="≤ 15",
+        passed=shiller_pe is not None and shiller_pe <= CYCLICAL_SHILLER_PE_THRESHOLD,
+        fair_value=shiller_fair,
+    ))
+
+    # 2. P/B ≤ 1.5（周期股 PB 是相对稳定的锚）
+    pb_fair: Optional[float] = None
+    if roe and roe > 0 and latest and latest.net_profit:
+        book_value = latest.net_profit / (roe / 100)
+        pb_fair = book_value * CYCLICAL_PB_THRESHOLD
+    iv.gates.append(ValueGate(
+        label="P/B ≤ 1.5",
+        current_str=f"{pb:.2f}" if pb else "—",
+        threshold_str="≤ 1.5",
+        passed=bool(pb and pb <= CYCLICAL_PB_THRESHOLD),
+        fair_value=pb_fair,
+    ))
+
+    # 3. 股息率 ≥ 4%（周期股需现金分红弥补盈利波动）
+    div_yield = _dividend_yield(profile, div, fin)
+    div_fair: Optional[float] = None
+    if div_yield is not None and div_yield > 0 and market_cap:
+        annual_div = div_yield / 100 * market_cap
+        div_fair = annual_div / (CYCLICAL_DIV_YIELD_THRESHOLD / 100)
+    iv.gates.append(ValueGate(
+        label="股息率 ≥ 4%（弥补周期波动）",
+        current_str=f"{div_yield:.2f}%" if div_yield is not None else "—",
+        threshold_str="≥ 4%",
+        passed=div_yield is not None and div_yield >= CYCLICAL_DIV_YIELD_THRESHOLD,
+        fair_value=div_fair,
+    ))
+
+    # 4. 当前 PE 比 Shiller PE 低 = 处于周期顶部预警；高 = 周期底部反而便宜
+    # 用「PE/Shiller PE ≥ 1.0」作为通过条件（即当前 PE 不低于 10 年均值）
+    cycle_ratio: Optional[float] = None
+    if pe and shiller_pe and shiller_pe > 0:
+        cycle_ratio = pe / shiller_pe
+    iv.gates.append(ValueGate(
+        label="当前 PE ≥ 10 年中位 PE（避开周期顶部）",
+        current_str=f"{cycle_ratio:.2f}" if cycle_ratio is not None else "—",
+        threshold_str="≥ 1.0",
+        passed=cycle_ratio is not None and cycle_ratio >= 1.0,
+        fair_value=None,  # 这是质量信号，不直接给市值
+    ))
+    return iv
+
+
 # ---- 银行体系：P/B / 隐含回报 / 股息率 / 留存复利 ----
 
 def _iv_bank(profile: CompanyProfile, fin: Financials, val: Valuation,
@@ -840,48 +1004,67 @@ def _iv_bank(profile: CompanyProfile, fin: Financials, val: Valuation,
     latest = fin.latest()
     roe = latest.roe if latest else None
 
-    # 1. P/B ≤ 1.5
+    # 公式辅助
+    book_value_total: Optional[float] = None
+    if roe and roe > 0 and latest and latest.net_profit:
+        book_value_total = latest.net_profit / (roe / 100)
+
+    # 1. P/B ≤ 1.5 → 合理市值 = book × 1.5
+    pb_fair = book_value_total * BANK_PB_THRESHOLD if book_value_total else None
     iv.gates.append(ValueGate(
         label="P/B ≤ 1.5",
         current_str=f"{pb:.2f}" if pb else "—",
         threshold_str="≤ 1.5",
         passed=bool(pb and pb <= BANK_PB_THRESHOLD),
+        fair_value=pb_fair,
     ))
 
-    # 2. 隐含回报 ROE/P/B ≥ 10%（"以这个 P/B 买入，每年从净资产复利出来的回报"）
+    # 2. 隐含回报 ROE/P/B ≥ 10% → 合理 P/B = ROE/10. 合理市值 = book × (ROE/10)
     implied: Optional[float] = (roe / pb) if (roe and pb and pb > 0) else None
+    implied_fair = (book_value_total * (roe / IMPLIED_RETURN_THRESHOLD)
+                    if book_value_total and roe else None)
     iv.gates.append(ValueGate(
         label="隐含回报 ROE÷PB ≥ 10%",
         current_str=f"{implied:.1f}%" if implied is not None else "—",
         threshold_str="≥ 10%",
         passed=implied is not None and implied >= IMPLIED_RETURN_THRESHOLD,
+        fair_value=implied_fair,
     ))
 
-    # 3. 股息率 ≥ 4%
+    # 3. 股息率 ≥ 4% → 合理市值 = 年分红 / 4%
     div_yield = _dividend_yield(profile, div, fin)
+    div_fair: Optional[float] = None
+    if div_yield is not None and div_yield > 0 and market_cap:
+        annual_dividend = div_yield / 100 * market_cap
+        div_fair = annual_dividend / (BANK_DIV_YIELD_THRESHOLD / 100)
     iv.gates.append(ValueGate(
         label="股息率 ≥ 4%",
         current_str=f"{div_yield:.2f}%" if div_yield is not None else "—",
         threshold_str="≥ 4%",
         passed=div_yield is not None and div_yield >= BANK_DIV_YIELD_THRESHOLD,
+        fair_value=div_fair,
     ))
 
     # 4. 留存复利价值 ≥ 市值
-    # 假设公司将留存（1-payout）部分按 ROE 复利 10 年，再以现价 PB 退出
-    # 简化：留存复利价值 = BVPS × shares ×  (1 + ROE×retain)^10  → 把 BVPS 估算为 净资产=net_profit/ROE
-    # 由于 retain ratio 不易拉，统一用 retain=0.5 作为估计
+    # 修正：假设 ROE 在 10 年内线性衰减到行业均值 10%（避免无限复利的乐观偏差）
     retained_value: Optional[float] = None
     shares = profile.shares
-    if roe and roe > 0 and shares and latest and latest.net_profit and market_cap:
-        equity_total = latest.net_profit / (roe / 100)
+    if roe and roe > 0 and book_value_total and book_value_total > 0:
         retain = 0.5
-        compound_factor = (1 + (roe / 100) * retain) ** 10
-        retained_value = equity_total * compound_factor
+        roe_decimal = roe / 100
+        roe_floor = 0.10  # 衰减目标 ROE = 行业均值 10%
+        # 用 10 年线性衰减 ROE 复利
+        equity = book_value_total
+        for year in range(10):
+            current_roe = roe_decimal - (roe_decimal - roe_floor) * (year / 9)
+            equity *= (1 + current_roe * retain)
+        retained_value = equity
     iv.gates.append(ValueGate(
-        label="留存复利价值（10 年）≥ 市值",
+        label="留存复利价值（10 年，ROE 衰减到 10%）≥ 市值",
         current_str=f"{retained_value/1e8:.0f} 亿" if retained_value else "—",
         threshold_str=f"≥ 市值",
         passed=bool(retained_value and market_cap and retained_value >= market_cap),
+        fair_value=retained_value,
     ))
     return iv
 
@@ -896,33 +1079,47 @@ def _iv_insurance(profile: CompanyProfile, fin: Financials, val: Valuation,
     latest = fin.latest()
     roe = latest.roe if latest else None
 
+    book_value_total: Optional[float] = None
+    if roe and roe > 0 and latest and latest.net_profit:
+        book_value_total = latest.net_profit / (roe / 100)
+
     # 1. P/B ≤ 1.5
+    pb_fair = book_value_total * INS_PB_THRESHOLD if book_value_total else None
     iv.gates.append(ValueGate(
         label="P/B ≤ 1.5",
         current_str=f"{pb:.2f}" if pb else "—",
         threshold_str="≤ 1.5",
         passed=bool(pb and pb <= INS_PB_THRESHOLD),
+        fair_value=pb_fair,
     ))
 
     # 2. 隐含回报 ROE/PB ≥ 10%
     implied: Optional[float] = (roe / pb) if (roe and pb and pb > 0) else None
+    implied_fair = (book_value_total * (roe / IMPLIED_RETURN_THRESHOLD)
+                    if book_value_total and roe else None)
     iv.gates.append(ValueGate(
         label="隐含回报 ROE÷PB ≥ 10%",
         current_str=f"{implied:.1f}%" if implied is not None else "—",
         threshold_str="≥ 10%",
         passed=implied is not None and implied >= IMPLIED_RETURN_THRESHOLD,
+        fair_value=implied_fair,
     ))
 
     # 3. 股息率 ≥ 3%
     div_yield = _dividend_yield(profile, div, fin)
+    div_fair: Optional[float] = None
+    if div_yield is not None and div_yield > 0 and market_cap:
+        annual_dividend = div_yield / 100 * market_cap
+        div_fair = annual_dividend / (INS_DIV_YIELD_THRESHOLD / 100)
     iv.gates.append(ValueGate(
         label="股息率 ≥ 3%",
         current_str=f"{div_yield:.2f}%" if div_yield is not None else "—",
         threshold_str="≥ 3%",
         passed=div_yield is not None and div_yield >= INS_DIV_YIELD_THRESHOLD,
+        fair_value=div_fair,
     ))
 
-    # 4. 净利波动 < 40%（保险盈利天然波动大，给 40% 比工业 25% 宽松）
+    # 4. 净利波动 < 40%（仅 quality 指标，不给 fair_value）
     cv: Optional[float] = None
     profits = [p.net_profit for p in fin.annual[:10] if p.net_profit is not None]
     if len(profits) >= 5:
@@ -962,8 +1159,12 @@ def _dividend_yield(profile: CompanyProfile, div: Optional[DividendInfo],
 # ---------------------------------------------------------------------------
 
 def _news(query: str, limit: int = 10) -> list[NewsItem]:
+    from stockwise.data.cache import cached_call, TTL_NEWS
     try:
-        df = ak.stock_news_em(symbol=query)
+        df = cached_call(
+            "akshare:stock_news_em", query, TTL_NEWS,
+            lambda: ak.stock_news_em(symbol=query),
+        )
     except Exception:
         return []
     if df is None or df.empty:

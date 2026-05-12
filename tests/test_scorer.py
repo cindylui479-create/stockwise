@@ -70,11 +70,13 @@ def _good_intrinsic() -> IntrinsicValue:
         industry_view="default",
         market_cap=1e10,
         gates=[
-            ValueGate("FCF Yield ≥ 6%", "8.0%", "≥ 6%", True),
-            ValueGate("Graham PE×PB ≤ 22", "15.0", "≤ 22", True),
-            ValueGate("OE×12 ≥ 市值", "120 亿", "≥ 市值", True),
-            ValueGate("DCF ≥ 市值", "150 亿", "≥ 市值", True),
+            ValueGate("FCF Yield ≥ 6%", "8.0%", "≥ 6%", True, fair_value=1.5e10),
+            ValueGate("Graham PE×PB ≤ 22", "15.0", "≤ 22", True, fair_value=1.4e10),
+            ValueGate("OE×12 ≥ 市值", "120 亿", "≥ 市值", True, fair_value=1.2e10),
+            ValueGate("DCF ≥ 市值", "150 亿", "≥ 市值", True, fair_value=1.5e10),
         ],
+        fair_value=1.45e10,
+        discount=31.0,
         margin_of_safety="充足",
     )
 
@@ -84,12 +86,14 @@ def _bad_intrinsic() -> IntrinsicValue:
         industry_view="default",
         market_cap=1e10,
         gates=[
-            ValueGate("FCF Yield ≥ 6%", "2.0%", "≥ 6%", False),
-            ValueGate("Graham PE×PB ≤ 22", "120.0", "≤ 22", False),
-            ValueGate("OE×12 ≥ 市值", "30 亿", "≥ 市值", False),
-            ValueGate("DCF ≥ 市值", "40 亿", "≥ 市值", False),
+            ValueGate("FCF Yield ≥ 6%", "2.0%", "≥ 6%", False, fair_value=3e9),
+            ValueGate("Graham PE×PB ≤ 22", "120.0", "≤ 22", False, fair_value=2e9),
+            ValueGate("OE×12 ≥ 市值", "30 亿", "≥ 市值", False, fair_value=3e9),
+            ValueGate("DCF ≥ 市值", "40 亿", "≥ 市值", False, fair_value=4e9),
         ],
-        margin_of_safety="不足",
+        fair_value=3e9,
+        discount=-233.0,   # market_cap 10亿 vs fair 3亿 → 严重高估
+        margin_of_safety="偏贵",
     )
 
 
@@ -126,7 +130,7 @@ def test_quality_company_overpriced():
     )
     res = score(snap, llm_business_score=5, llm_management_score=4)
     assert res.rating in {"优质但偏贵", "质量好但有瑕疵", "未达伯克希尔标准"}
-    assert res.margin_of_safety == "不足"
+    assert res.margin_of_safety in {"不足", "偏贵"}
 
 
 def test_terrible_company_vetoed():

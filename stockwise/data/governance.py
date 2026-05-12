@@ -57,13 +57,17 @@ def fetch_events(code: str, market: str) -> GovernanceReport:
     if market != "A":
         return GovernanceReport(skipped=True, error="治理事件抓取暂不支持港股")
 
+    from stockwise.data.cache import cached_call, TTL_GOVERNANCE
     end = datetime.today()
     start = end - timedelta(days=LOOKBACK_DAYS)
     try:
-        df = ak.stock_individual_notice_report(
-            security=code, symbol="全部",
-            begin_date=start.strftime("%Y%m%d"),
-            end_date=end.strftime("%Y%m%d"),
+        df = cached_call(
+            "cninfo:notice_report", code, TTL_GOVERNANCE,
+            lambda: ak.stock_individual_notice_report(
+                security=code, symbol="全部",
+                begin_date=start.strftime("%Y%m%d"),
+                end_date=end.strftime("%Y%m%d"),
+            ),
         )
     except Exception as e:
         return GovernanceReport(error=f"巨潮接口失败：{type(e).__name__}: {e}")

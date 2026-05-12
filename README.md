@@ -15,25 +15,52 @@ cp .env.example .env       # 填入至少一个 LLM Key（见下）
 
 ## 使用
 
+### 单股分析
+
 ```bash
 # A 股
 python -m stockwise 600519              # 贵州茅台
-python -m stockwise 002594              # 比亚迪
-python -m stockwise 300750              # 宁德时代（自动识别为成长股版评估）
-python -m stockwise 600036              # 招商银行（自动识别为银行业版评估）
+python -m stockwise 300750              # 宁德时代（自动用成长股版评估）
+python -m stockwise 600036              # 招商银行（自动用银行业版）
+python -m stockwise 601088              # 中国神华（自动用周期股版，Shiller PE 替代 PE）
 
-# 港股（自动用 yfinance 拿数据）
+# 港股
 python -m stockwise 00700 --hk          # 腾讯控股
-python -m stockwise 00939 --hk          # 建设银行（自动识别为银行业版）
+python -m stockwise 00939 --hk          # 建设银行（银行业版）
 
-# 跳过 LLM，纯规则打分
-python -m stockwise 600519 --no-llm
-
-# 各级数据源开关（按需关闭）
-python -m stockwise 600519 --no-validate    # 跳过 baostock 副源校验
-python -m stockwise 600519 --no-governance  # 跳过 巨潮治理事件
-python -m stockwise 600519 --no-holders     # 跳过 股东结构
+# 选项
+python -m stockwise 600519 --no-llm     # 跳过 LLM，纯规则打分
+python -m stockwise 600519 --brief      # 只输出快读版（5 行决策表）
+python -m stockwise 600519 --no-validate     # 跳过 baostock 副源校验
+python -m stockwise 600519 --no-governance   # 跳过 巨潮治理事件
+python -m stockwise 600519 --no-holders      # 跳过 股东结构
 ```
+
+### Watchlist 监控
+
+```bash
+python -m stockwise watch add 600519        # 加入观察列表
+python -m stockwise watch add 00700 --hk    # 港股
+python -m stockwise watch remove 600519
+python -m stockwise watch list              # 看所有标的最近一次评级
+python -m stockwise watch run               # 批量跑 watchlist，标记评级变化
+python -m stockwise watch run --no-llm --brief   # 批量快读版
+```
+
+`watch list` 输出示例：
+
+```
+代码      市场  名称       评级              得分  安全边际  行动建议
+600036    A    招商银行   值得长期持有       91   充足     可以入场（折价充足）
+601318    A    中国平安   质量好且估值合理   84   充足     可以入场（折价充足）
+600519    A    贵州茅台   质量好但有瑕疵    72   偏贵     等待回调（估值偏贵）
+688256    A    寒武纪     避免              35   偏贵     避免（触发一票否决） ⚠ 治理红旗
+```
+
+### 缓存
+
+财报/分红/治理事件等不变数据缓存 24 小时-7 天（在 `~/.stockwise/cache.db`）。
+跑批量 watchlist 时性能 ×10。禁用：`STOCKWISE_NO_CACHE=1`。
 
 报告写入 `reports/<code>_<YYYY-MM-DD>.md`。
 
@@ -42,21 +69,34 @@ python -m stockwise 600519 --no-holders     # 跳过 股东结构
 | Profile | 适用 | 安全边际口径 |
 |---|---|---|
 | **default** | 消费 / 制造 / 一般企业 | FCF Yield + Graham PE×PB + OE×12 + DCF 含增长 |
-| **bank** | 银行 / 货币金融服务 | P/B + ROE÷PB 隐含回报 + 股息率 + 留存复利 |
+| **bank** | 银行 / 货币金融服务 | P/B + ROE÷PB 隐含回报 + 股息率 + 衰减 ROE 留存复利 |
 | **insurance** | 保险 | P/B + 股息率 + 隐含回报 + 净利稳定性 |
-| **growth** | 营收 5 年 CAGR ≥ 15-25%、研发驱动 | PEG + (1/PE + g) 隐含回报 + PS÷增长率 + DCF 含增长 |
+| **growth** | 营收 5 年 CAGR ≥ 15-25%、研发驱动 | PEG（保守 g）+ (1/PE + g) + PS÷CAGR + DCF |
+| **cyclical** | 钢铁/煤炭/有色/石油/航运/化工/水泥 | **Shiller PE**（10 年均值 EPS）+ P/B + 高股息率 + 周期顶部预警 |
 
 **识别规则**：
 - 银行/保险走对应 profile（A 股 INDUSTRYCSRC1 + 港股 yfinance industry，中英双语关键字）
 - 高研发行业 + CAGR ≥ 15% 或 CAGR ≥ 25% 且非资源类 → growth profile
 - 否则 default
 
-**评级标签**（伯克希尔风格）：
-- 综合分 ≥85 + 安全边际充足 → **值得长期持有**
-- ≥85 + 其他 → **优质但偏贵**（进 watchlist）
-- 70-84 → **质量好但有瑕疵**
+**质量评级**（5 档 + 否决）：
+- ≥85 + 充足 → **值得长期持有**
+- ≥85 + 一般 → **优质合理估值**
+- ≥85 + 其他 → **优质但偏贵**
+- 70-84 + 充足/一般 → **质量好且估值合理**
+- 70-84 + 其他 → **质量好但有瑕疵**
 - < 70 → **未达伯克希尔标准**
 - 一票否决 → **避免**
+
+**行动建议**（独立于评级，给具体决策）：
+- 评级 ≥70 + 折价 ≥30% → **可以入场（折价充足）**
+- 评级 ≥70 + 折价 10-30% → **可以入场（谨慎）**
+- 评级 ≥70 + 折价 -10-10% → **已持有可继续，新仓需等**
+- 评级 ≥70 + 折价 <-10% → **等待回调**
+- 50-70 → **观察，不建议新仓**
+- <50 或否决 → **避免**
+
+**安全边际** = (内在价值 - 当前市值) / 内在价值 × 100%。内在价值由各 profile 的 4 道关综合中位数得出。0-20 分按折价率连续线性映射，标签 4 档：充足 (≥30%) / 一般 (10-30%) / 不足 (-10-10%) / 偏贵 (<-10%)。
 
 **一票否决项**：
 - 近 5 年任一年净利润为负

@@ -26,12 +26,15 @@ def fetch_holders(code: str, market: str, yf_info: Optional[dict] = None) -> Hol
 
 
 def _fetch_a_holders(code: str) -> HolderInfo:
+    from stockwise.data.cache import cached_call, TTL_HOLDERS
     sym = ("sh" if code[0] == "6" else "sz") + code
-    # 季报披露日依次降序尝试
     candidates = _recent_quarter_ends()
     for date in candidates:
         try:
-            df = ak.stock_gdfx_free_top_10_em(symbol=sym, date=date)
+            df = cached_call(
+                "akshare:stock_gdfx_free_top_10_em", f"{sym}:{date}", TTL_HOLDERS,
+                lambda: ak.stock_gdfx_free_top_10_em(symbol=sym, date=date),
+            )
         except Exception:
             continue
         if df is None or df.empty:

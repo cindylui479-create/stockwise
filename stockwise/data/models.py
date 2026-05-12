@@ -87,10 +87,12 @@ class Valuation:
 @dataclass
 class ValueGate:
     """安全边际中单个估值关。"""
-    label: str               # 显示名，如 "FCF Yield ≥ 6%"
-    current_str: str         # 当前值的展示，如 "4.46%"
-    threshold_str: str       # 阈值的展示，如 "≥ 6%"
+    label: str
+    current_str: str
+    threshold_str: str
     passed: bool
+    fair_value: Optional[float] = None
+    """该口径推算的"合理市值"。综合 fair_value 取多口径中位数（保守视角）。"""
 
 
 @dataclass
@@ -104,7 +106,11 @@ class IntrinsicValue:
     industry_view: str = "default"
     market_cap: Optional[float] = None
     gates: list[ValueGate] = field(default_factory=list)
-    margin_of_safety: str = "未知"          # "充足" / "一般" / "不足" / "未知"
+    margin_of_safety: str = "未知"          # "充足" / "一般" / "不足" / "偏贵" / "未知"
+    fair_value: Optional[float] = None
+    """综合内在价值（多口径中位数，单位与市值一致）。"""
+    discount: Optional[float] = None
+    """安全边际百分比 = (fair_value - market_cap) / fair_value × 100。正=折价，负=溢价。"""
 
     def passes_count(self) -> int:
         return sum(1 for g in self.gates if g.passed)

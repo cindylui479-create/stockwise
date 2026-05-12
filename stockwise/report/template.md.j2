@@ -5,10 +5,30 @@
 
 ---
 
+## 📋 快读（一眼看决策）
+
+| 维度 | 结果 |
+|---|---|
+| **评级** | **{{ score.rating }}**（{{ score.total }}/100） |
+| **行动建议** | **{{ score.action }}** |
+| **安全边际** | {{ score.margin_of_safety }}{% if intrinsic.discount is not none %}（折价 {{ "%+.0f" | format(intrinsic.discount) }}%）{% endif %} |
+| **评估口径** | {% if score.industry_view == 'bank' %}银行业版{% elif score.industry_view == 'insurance' %}保险业版{% elif score.industry_view == 'growth' %}成长股版{% elif score.industry_view == 'cyclical' %}周期股版{% else %}默认（消费/制造）{% endif %} |
+| **当前价 / 内在价值** | {{ format_price(profile.current_price, profile.currency) }} / {% if intrinsic.fair_value and profile.shares %}{{ format_price(intrinsic.fair_value / profile.shares, profile.currency) }}{% else %}—{% endif %} |
+{% if score.vetoes -%}
+| ⚠️ **一票否决** | {{ score.vetoes | join('；') }} |
+{% endif -%}
+{% if score.reasons -%}
+| **关键支撑** | {{ score.reasons[0] }} |
+{% endif -%}
+
+---
+
 ## 综合判断
 
 **{{ score.rating }}** （综合得分 {{ score.total }} / 100，安全边际：**{{ score.margin_of_safety }}**，
-评估口径：{% if score.industry_view == 'bank' %}银行业版{% elif score.industry_view == 'insurance' %}保险业版{% elif score.industry_view == 'growth' %}成长股版{% else %}默认（消费/制造）{% endif %}）
+评估口径：{% if score.industry_view == 'bank' %}银行业版{% elif score.industry_view == 'insurance' %}保险业版{% elif score.industry_view == 'growth' %}成长股版{% elif score.industry_view == 'cyclical' %}周期股版{% else %}默认（消费/制造）{% endif %}）
+
+> **行动建议**：{{ score.action }}
 
 | 维度 | 得分 | 满分 |
 |---|---:|---:|
@@ -107,6 +127,8 @@
 > 评估口径：**保险业版**（P/B + 股息率 + 净利稳定性）
 {% elif intrinsic.industry_view == 'growth' -%}
 > 评估口径：**成长股版**（林奇 GARP：PEG + 隐含回报 + PS÷增长率 + DCF 含增长）
+{% elif intrinsic.industry_view == 'cyclical' -%}
+> 评估口径：**周期股版**（Shiller CAPE：10 年平均 EPS + P/B + 高股息率 + 周期顶部预警）
 {% else -%}
 > 评估口径：**默认**（消费/制造：FCF Yield + Graham + OE×12 + DCF 含增长）
 {%- endif %}
@@ -118,7 +140,16 @@
 {% endfor -%}
 | 当前市值 | {{ format_money(intrinsic.market_cap, profile.currency) }} | — | — |
 
-**安全边际：{{ intrinsic.margin_of_safety }}**（{{ intrinsic.total_gates() }} 道关通过 {{ intrinsic.passes_count() }} / {{ intrinsic.total_gates() }}）
+{% if intrinsic.fair_value -%}
+**综合内在价值（多口径中位数）**：{{ format_money(intrinsic.fair_value, profile.currency) }}
+**当前折价**：{{ "%+.1f" | format(intrinsic.discount) }}%（正值 = 折价，负值 = 溢价）
+
+**安全边际：{{ intrinsic.margin_of_safety }}**（{{ intrinsic.passes_count() }}/{{ intrinsic.total_gates() }} 道关通过；评分按折价率连续映射 0-20）
+
+> 标签分档：充足 ≥ 30% ｜ 一般 10-30% ｜ 不足 -10-10% ｜ 偏贵 < -10%
+{% else -%}
+**安全边际：{{ intrinsic.margin_of_safety }}**（数据不足，无法综合估算内在价值）
+{%- endif %}
 
 {% if llm and llm.intrinsic_value_view -%}
 **LLM 视角的内在价值判断：**
