@@ -1,6 +1,6 @@
 [project]
 name = "stockwise"
-version = "0.4.0"
+version = "0.5.0"
 description = "巴菲特/林奇范式 A 股 + 港股价值投资分析工具：5 类行业 profile + 5 数据源 + 行动建议 + watchlist 监控"
 license = { text = "MIT" }
 requires-python = ">=3.10"

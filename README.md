@@ -36,6 +36,34 @@ python -m stockwise 600519 --no-governance   # 跳过 巨潮治理事件
 python -m stockwise 600519 --no-holders      # 跳过 股东结构
 ```
 
+### 行业 Top N 筛选（v0.5.0）
+
+```bash
+# 全 A 股按行业 top 3 筛选（约 83 行业 × 3 = 250 只，30 分制粗筛打分）
+python -m stockwise screen
+
+# 已扫描过用 --cache-only 秒回
+python -m stockwise screen --cache-only
+
+# 按行业筛
+python -m stockwise screen --include "银行|白酒|医药"
+python -m stockwise screen --exclude "煤炭|钢铁"
+
+# 调每行业 top N
+python -m stockwise screen --industry-top 5
+
+# 高分入选直接加 watchlist
+python -m stockwise screen --min-score 22 --to-watchlist
+
+# 列出所有行业及成分股数
+python -m stockwise screen --list-industries
+
+# 从 SQLite 缓存查
+python -m stockwise screen --from-cache --industry "银行"
+```
+
+quick_score 30 分制：ROE 10 + PE 5 + PB 5 + 负债率 5 + FCF/股 5。数据全部来自 baostock（独立于东财，不依赖 push2）。首次扫描约 30-45 分钟，缓存后秒回。
+
 ### Watchlist 监控
 
 ```bash

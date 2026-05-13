@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import Optional
 
 import click
 
@@ -12,6 +13,9 @@ from stockwise.data.fetcher import fetch
 from stockwise.data.market import parse_code
 from stockwise.report.generator import render, write
 from stockwise.watchlist import Watchlist
+from stockwise.screening import (
+    screen_industry_leaders, load_quick_results, save_quick_result,
+)
 
 
 @click.group(invoke_without_command=True)
@@ -260,7 +264,141 @@ def watch_run(no_llm: bool, brief: bool, out: Path | None):
         click.echo("\n\n所有标的评级 / 行动建议无显著变化。")
 
 
-# 兼容老入口：`from stockwise.cli import main`
+# ============================================================================
+# screen 子命令
+# ============================================================================
+
+@cli.command()
+@click.option("--industry-top", "top_n", type=int, default=3,
+              help="每个行业取 top N（按净利润）。默认 3")
+@click.option("--include", default=None,
+              help="只看含这些关键词的行业，用 | 分隔。如 '银行|保险|白酒'")
+@click.option("--exclude", default=None,
+              help="排除这些关键词的行业")
+@click.option("--workers", type=int, default=4, help="并发数")
+@click.option("--top", "show_top", type=int, default=30,
+              help="显示总榜前 N 名（按 quick_score 降序）")
+@click.option("--min-score", type=int, default=None,
+              help="只显示 quick_score ≥ N 的标的")
+@click.option("--to-watchlist", is_flag=True, help="将筛选结果加入 watchlist")
+@click.option("--from-cache", is_flag=True, help="只查询 SQLite 已扫描结果，不重新扫描")
+@click.option("--cache-only", is_flag=True,
+              help="跳过 baostock 净利润拉取，仅用已缓存数据。首次跑后秒回")
+@click.option("--list-industries", is_flag=True, help="列出所有可用行业及成分股数")
+def screen(top_n: int, include: Optional[str], exclude: Optional[str], workers: int,
+           show_top: int, min_score: Optional[int], to_watchlist: bool, from_cache: bool,
+           cache_only: bool, list_industries: bool):
+    """按行业 top N 扫描 A 股，30 分制粗筛打分。"""
+    if list_industries:
+        from stockwise.industry import list_industries as _list
+        click.echo("所有 A 股行业（按成分股数降序）：")
+        for ind, n in _list():
+            click.echo(f"  {n:>5}  {ind}")
+        return
+    if from_cache:
+        results = _load_results(include, min_score, show_top)
+        _print_results(results)
+        if to_watchlist:
+            _add_results_to_watchlist(results)
+        return
+
+    industry_filter = include.split("|") if include else None
+    exclude_list = exclude.split("|") if exclude else None
+
+    click.echo(f"[扫描] 行业 top {top_n}"
+               + (f"，含: {include}" if include else "")
+               + (f"，排除: {exclude}" if exclude else ""))
+
+    last_phase = [""]
+    def progress_cb(done, total, phase="industry"):
+        if phase != last_phase[0]:
+            stage = "拉取行业净利润" if phase == "industry" else "Quick scan 财务+估值"
+            click.echo(f"\n[{stage}] 进度: {done}/{total}", nl=False)
+            last_phase[0] = phase
+        else:
+            click.echo(f"\r[{'拉取净利润' if phase=='industry' else 'Quick scan'}] {done}/{total}",
+                       nl=False)
+
+    results = screen_industry_leaders(
+        top_n=top_n, industry_filter=industry_filter,
+        exclude=exclude_list, workers=workers, progress_cb=progress_cb,
+        cache_only=cache_only,
+    )
+    click.echo()  # newline after progress
+    if not results:
+        click.secho("无结果（可能行业过滤过严或 baostock 接口失败）", fg="yellow")
+        return
+
+    # 过滤显示
+    sorted_results = sorted(results, key=lambda r: r.quick_score, reverse=True)
+    if min_score is not None:
+        sorted_results = [r for r in sorted_results if r.quick_score >= min_score]
+    shown = sorted_results[:show_top]
+
+    _print_quick_results(shown)
+    click.secho(f"\n扫描完成：{len(results)} 只 / {len(set(r.industry for r in results))} 个行业",
+                fg="green")
+
+    if to_watchlist:
+        _add_quick_results_to_watchlist(shown)
+
+
+def _print_quick_results(results) -> None:
+    click.echo()
+    click.echo(f"{'代码':<8} {'名称':<12} {'行业':<26} {'排名':<4} "
+               f"{'PE':>6} {'PB':>5} {'ROE':>6} {'负债':>5} {'FCF/股':>7} "
+               f"{'Score':>6}  说明")
+    click.echo("-" * 130)
+    for r in results:
+        pe = f"{r.pe:.1f}" if r.pe else "—"
+        pb = f"{r.pb:.2f}" if r.pb else "—"
+        roe = f"{r.roe_5y:.1f}%" if r.roe_5y else "—"
+        debt = f"{r.debt_ratio:.0f}%" if r.debt_ratio is not None else "—"
+        fcf = f"{r.fcf_per_share:.2f}" if r.fcf_per_share is not None else "—"
+        ind = (r.industry or "—")[:24]
+        flags = " ".join(r.quick_flags)[:40]
+        click.echo(f"{r.code:<8} {r.name[:10]:<12} {ind:<26} #{r.industry_rank:<3} "
+                   f"{pe:>6} {pb:>5} {roe:>6} {debt:>5} {fcf:>7} "
+                   f"{r.quick_score:>3}/30  {flags}")
+
+
+def _load_results(industry, min_score, limit):
+    return load_quick_results(industry=industry, min_score=min_score, limit=limit)
+
+
+def _print_results(rows) -> None:
+    if not rows:
+        click.echo("缓存里没有结果。先跑一次 `stockwise screen` 扫描。")
+        return
+    click.echo(f"{'代码':<8} {'名称':<12} {'行业':<26} {'排名':<4} {'Score':>6}")
+    click.echo("-" * 70)
+    for d in rows:
+        ind = (d.get("industry") or "—")[:24]
+        click.echo(f"{d['code']:<8} {d['name'][:10]:<12} {ind:<26} "
+                   f"#{d.get('industry_rank') or '—':<3} {d.get('quick_score', 0):>3}/30")
+
+
+def _add_quick_results_to_watchlist(results) -> None:
+    wl = Watchlist.load()
+    added = 0
+    for r in results:
+        if wl.add(r.code, "A", r.name):
+            added += 1
+    wl.save()
+    click.secho(f"✓ 加入 watchlist {added} 只（重复的跳过）", fg="green")
+
+
+def _add_results_to_watchlist(rows) -> None:
+    wl = Watchlist.load()
+    added = 0
+    for d in rows:
+        if wl.add(d["code"], "A", d.get("name") or d["code"]):
+            added += 1
+    wl.save()
+    click.secho(f"✓ 加入 watchlist {added} 只（重复的跳过）", fg="green")
+
+
+# 兼容老入口
 main = cli
 
 

@@ -86,15 +86,30 @@ def cache_set(namespace: str, key: str, value: Any) -> None:
         pass
 
 
+_NONE_SENTINEL = "__cached_none__"
+
+
 def cached_call(namespace: str, key: str, ttl_hours: float,
-                fn: Callable, *args, **kwargs) -> Any:
-    """带缓存包装：命中即返回；否则执行并写入。"""
+                fn: Callable, *args,
+                cache_none: bool = False, **kwargs) -> Any:
+    """带缓存包装：命中即返回；否则执行并写入。
+
+    cache_none=True：把 None 结果也缓存（哨兵值），避免反复重试已知失败的调用
+    （如停牌股的 baostock profit 查询，每次都返回空但要 5 秒）
+    """
     hit = cache_get(namespace, key, ttl_hours)
+    if isinstance(hit, str) and hit == _NONE_SENTINEL:
+        return None
     if hit is not None:
         return hit
-    result = fn(*args, **kwargs)
+    try:
+        result = fn(*args, **kwargs)
+    except Exception:
+        result = None
     if result is not None:
         cache_set(namespace, key, result)
+    elif cache_none:
+        cache_set(namespace, key, _NONE_SENTINEL)
     return result
 
 
