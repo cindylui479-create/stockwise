@@ -36,6 +36,29 @@ python -m stockwise 600519 --no-governance   # 跳过 巨潮治理事件
 python -m stockwise 600519 --no-holders      # 跳过 股东结构
 ```
 
+### 历史回测（v0.6.0）
+
+```bash
+# 以指定日期为起点，看持有 watchlist 至今表现 vs 沪深 300
+python -m stockwise backtest --as-of 2025-01-02 --from-watchlist
+
+# 回测 screen 出的 top N（按 quick_score）
+python -m stockwise backtest --as-of 2025-01-02 --from-screen --min-score 22
+
+# 自定义标的池
+python -m stockwise backtest --as-of 2024-12-31 --codes 600519,000858,600036
+```
+
+输出每只股票的起点价、终点价、收益率，以及等权组合 vs 沪深 300 的超额收益 alpha。
+
+### 可视化热图（v0.6.0）
+
+```bash
+python -m stockwise screen --cache-only --heatmap ./reports/heat.html
+```
+
+按行业 × top N 二维布局，颜色按 quick_score 着色（红→黄→绿渐变）。
+
 ### 行业 Top N 筛选（v0.5.0）
 
 ```bash
@@ -54,6 +77,12 @@ python -m stockwise screen --industry-top 5
 
 # 高分入选直接加 watchlist
 python -m stockwise screen --min-score 22 --to-watchlist
+
+# 对 top N 自动跑完整深度分析（含 LLM）+ 加入 watchlist
+python -m stockwise screen --to-deep --top 10
+
+# 港股 screen（从 80+ 恒生主流标的池）
+python -m stockwise screen --hk --industry-top 3
 
 # 列出所有行业及成分股数
 python -m stockwise screen --list-industries

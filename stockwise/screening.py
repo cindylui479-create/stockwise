@@ -43,7 +43,7 @@ class QuickResult:
     pb: Optional[float] = None
     roe_5y: Optional[float] = None
     debt_ratio: Optional[float] = None
-    fcf_per_share: Optional[float] = None
+    cfo_to_np: Optional[float] = None      # CFO / 净利润 比率（baostock CFOToNP）
     net_profit: Optional[float] = None
     quick_score: int = 0
     quick_flags: list[str] = field(default_factory=list)
@@ -69,13 +69,19 @@ def _db() -> sqlite3.Connection:
             pb REAL,
             roe_5y REAL,
             debt_ratio REAL,
-            fcf_per_share REAL,
+            cfo_to_np REAL,
             net_profit REAL,
             quick_score INT,
             quick_flags TEXT,
             scanned_at REAL
         )
     """)
+    # 兼容旧 schema（v0.5.0 有 fcf_per_share 列）
+    try:
+        conn.execute("ALTER TABLE screen_index ADD COLUMN cfo_to_np REAL")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass  # already exists
     conn.commit()
     return conn
 
@@ -86,13 +92,13 @@ def save_quick_result(r: QuickResult) -> None:
     conn.execute("""
         REPLACE INTO screen_index
         (code, name, industry, industry_rank, profile_view, market_cap,
-         pe, pb, roe_5y, debt_ratio, fcf_per_share, net_profit,
+         pe, pb, roe_5y, debt_ratio, cfo_to_np, net_profit,
          quick_score, quick_flags, scanned_at)
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     """, (
         r.code, r.name, r.industry, r.industry_rank, r.profile_view,
         r.market_cap, r.pe, r.pb, r.roe_5y, r.debt_ratio,
-        r.fcf_per_share, r.net_profit,
+        r.cfo_to_np, r.net_profit,
         r.quick_score, json.dumps(r.quick_flags, ensure_ascii=False),
         time.time(),
     ))
@@ -154,6 +160,7 @@ def quick_score(leader: IndustryLeader) -> QuickResult:
         pe, pb, ps, close = _bs_latest_valuation(leader.bs_code)
         roes = _bs_roe_history(leader.bs_code, years=5)
         debt = _bs_latest_debt_ratio(leader.bs_code)
+        cfo_np = _bs_cfo_to_np(leader.bs_code)
     except Exception as e:
         r.error = f"{type(e).__name__}: {e}"
         return r
@@ -162,6 +169,7 @@ def quick_score(leader: IndustryLeader) -> QuickResult:
     r.pb = pb
     r.roe_5y = sum(roes) / len(roes) if roes else None
     r.debt_ratio = debt
+    r.cfo_to_np = cfo_np
 
     # 用行业关键字做 profile classification（不需要 fin，只看 industry 字符串）
     r.profile_view = classify_industry_view(leader.industry, None)
@@ -190,13 +198,19 @@ def _bs_latest_valuation(bs_code: str) -> tuple:
         df = rs.get_data()
         if df is None or df.empty:
             return None
-        row = df.iloc[-1]
-        return (
-            _to_float(row.get("peTTM")),
-            _to_float(row.get("pbMRQ")),
-            _to_float(row.get("psTTM")),
-            _to_float(row.get("close")),
-        )
+        # 倒序找最近一行 PE 不为空的（当日盘前 PE 字段可能未填）
+        for _, row in df.iloc[::-1].iterrows():
+            pe = _to_float(row.get("peTTM"))
+            if pe is not None:
+                return (
+                    pe,
+                    _to_float(row.get("pbMRQ")),
+                    _to_float(row.get("psTTM")),
+                    _to_float(row.get("close")),
+                )
+        # 全空时只返回 close
+        last = df.iloc[-1]
+        return (None, None, None, _to_float(last.get("close")))
     result = cached_call("baostock:val_kline", bs_code, 24, _call, cache_none=True)
     return result if result else (None, None, None, None)
 
@@ -224,6 +238,26 @@ def _bs_roe_history(bs_code: str, years: int = 5) -> list[float]:
         return out if out else None
     result = cached_call("baostock:roe_history", bs_code, 24 * 30, _call, cache_none=True)
     return result or []
+
+
+def _bs_cfo_to_np(bs_code: str) -> Optional[float]:
+    """baostock CFOToNP：经营现金流 / 净利润 比率。"""
+    from stockwise.data.cache import cached_call
+    from datetime import datetime
+
+    def _call():
+        from stockwise.industry import _ensure_baostock_login
+        import baostock as bs
+        _ensure_baostock_login()
+        for year in range(datetime.today().year - 1, datetime.today().year - 4, -1):
+            rs = bs.query_cash_flow_data(code=bs_code, year=year, quarter=4)
+            df = rs.get_data()
+            if df is not None and not df.empty:
+                v = _to_float(df.iloc[0].get("CFOToNP"))
+                if v is not None:
+                    return v
+        return None
+    return cached_call("baostock:cfo_to_np", bs_code, 24 * 30, _call, cache_none=True)
 
 
 def _bs_latest_debt_ratio(bs_code: str) -> Optional[float]:
@@ -310,12 +344,20 @@ def _compute_quick_score(r: QuickResult) -> tuple[int, list[str]]:
         else:
             flags.append(f"⚠ 负债率 {r.debt_ratio:.0f}%")
 
-    # FCF/股 ≥ 0 (5 分)
-    if r.fcf_per_share is not None:
-        if r.fcf_per_share > 0:
+    # CFO/净利润 ≥ 0.8 (5 分；金融业跳过给中位)
+    if is_fin:
+        score += 3
+    elif r.cfo_to_np is not None:
+        if r.cfo_to_np >= 0.8:
             score += 5
+        elif r.cfo_to_np >= 0.5:
+            score += 3
+        elif r.cfo_to_np >= 0:
+            score += 1
         else:
-            flags.append("⚠ FCF/股 ≤ 0")
+            flags.append(f"⚠ CFO/净利 {r.cfo_to_np:.2f}")
+    else:
+        score += 2  # 数据缺失给中位
 
     # 硬否决标记
     if r.pe and r.pb and r.pe * r.pb > 100:
@@ -324,6 +366,113 @@ def _compute_quick_score(r: QuickResult) -> tuple[int, list[str]]:
         flags.append("⚠ 最近净利润 ≤ 0")
 
     return score, flags
+
+
+def screen_hk(top_n: int = 3,
+              industry_filter: Optional[list[str]] = None,
+              exclude: Optional[list[str]] = None,
+              progress_cb=None) -> list[QuickResult]:
+    """港股 quick screen：从硬编码主流标的池拿 yfinance 数据，按 industry top N。"""
+    from stockwise.hk_universe import all_hk_pool
+
+    pool = all_hk_pool()
+    results: list[QuickResult] = []
+    for i, (code, name_hint) in enumerate(pool):
+        r = _quick_score_hk(code, name_hint)
+        if r is None or r.industry == "—":
+            if progress_cb:
+                progress_cb(i + 1, len(pool), phase="hk")
+            continue
+        # 行业过滤
+        if industry_filter:
+            from stockwise.industry import _expand_keywords
+            keys = _expand_keywords(industry_filter)
+            if not any(k.lower() in (r.industry or "").lower() for k in keys):
+                if progress_cb:
+                    progress_cb(i + 1, len(pool), phase="hk")
+                continue
+        if exclude:
+            from stockwise.industry import _expand_keywords
+            ex_keys = _expand_keywords(exclude)
+            if any(k.lower() in (r.industry or "").lower() for k in ex_keys):
+                if progress_cb:
+                    progress_cb(i + 1, len(pool), phase="hk")
+                continue
+        results.append(r)
+        if progress_cb:
+            progress_cb(i + 1, len(pool), phase="hk")
+
+    # 按 industry 分组取 top N（按 net_profit / market_cap 排序）
+    by_industry: dict[str, list[QuickResult]] = {}
+    for r in results:
+        by_industry.setdefault(r.industry, []).append(r)
+    out: list[QuickResult] = []
+    for ind, items in by_industry.items():
+        items.sort(key=lambda x: (x.market_cap or 0), reverse=True)
+        for rank, r in enumerate(items[:top_n], 1):
+            r.industry_rank = rank
+            save_quick_result(r)
+            out.append(r)
+    return out
+
+
+def _quick_score_hk(code: str, name_hint: str) -> Optional[QuickResult]:
+    """对港股单只跑 quick scan：用 yfinance。"""
+    from stockwise.data.cache import cached_call
+
+    def _call():
+        try:
+            import yfinance as yf
+        except ImportError:
+            return None
+        sym = f"{int(code):04d}.HK"
+        try:
+            info = yf.Ticker(sym).info
+        except Exception:
+            return None
+        if not info or info.get("marketCap") is None:
+            return None
+        return info
+
+    info = cached_call(f"yfinance:hk_info", code, 24, _call, cache_none=True)
+    if not info:
+        return None
+
+    r = QuickResult(code=code, name=info.get("longName") or name_hint,
+                     industry=info.get("industry") or "—",
+                     industry_rank=0)
+    r.market_cap = info.get("marketCap")
+    r.pe = info.get("trailingPE")
+    r.pb = info.get("priceToBook")
+    roe_dec = info.get("returnOnEquity")
+    r.roe_5y = roe_dec * 100 if roe_dec else None
+    # debtToEquity 是百分数（如 50 表示 50%），转资产负债率
+    dte = info.get("debtToEquity")
+    if dte is not None:
+        dte_decimal = dte / 100  # yfinance 给的是百分数 50 而非 0.5
+        r.debt_ratio = dte_decimal / (1 + dte_decimal) * 100
+    r.cfo_to_np = None
+    r.profile_view = _hk_industry_to_view(r.industry)
+
+    score, flags = _compute_quick_score(r)
+    r.quick_score = score
+    r.quick_flags = flags
+    return r
+
+
+def _hk_industry_to_view(industry: str) -> str:
+    if not industry:
+        return "default"
+    s = industry.lower()
+    if "bank" in s:
+        return "bank"
+    if "insurance" in s:
+        return "insurance"
+    if any(k in s for k in ("internet", "software", "semiconductors", "biotechnology")):
+        return "growth"
+    if any(k in s for k in ("oil", "gas", "mining", "steel", "shipping", "cement")):
+        return "cyclical"
+    return "default"
 
 
 def screen_industry_leaders(top_n: int = 3,

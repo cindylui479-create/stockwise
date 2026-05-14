@@ -122,8 +122,19 @@ def _compute_buyout_metrics(snapshot: StockSnapshot):
     return out
 
 
-def write(report_md: str, code: str, out_dir: Path) -> Path:
+def write(report_md: str, code: str, out_dir: Path, name: Optional[str] = None) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / f"{code}_{date.today().isoformat()}.md"
+    name_part = _sanitize_filename(name) if name and name != code else ""
+    suffix = f"_{name_part}" if name_part else ""
+    path = out_dir / f"{code}{suffix}_{date.today().isoformat()}.md"
     path.write_text(report_md, encoding="utf-8")
     return path
+
+
+def _sanitize_filename(s: str) -> str:
+    """文件名安全清理：替换非法字符；保留中文。"""
+    import re
+    # Windows / Linux 文件系统通用非法字符：/ \ : * ? " < > |
+    s = re.sub(r'[\\/:\*\?"<>\|]', '_', s)
+    s = s.strip().replace(" ", "_")
+    return s[:30]  # 限制长度

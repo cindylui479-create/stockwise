@@ -14,8 +14,9 @@ from stockwise.data.market import parse_code
 from stockwise.report.generator import render, write
 from stockwise.watchlist import Watchlist
 from stockwise.screening import (
-    screen_industry_leaders, load_quick_results, save_quick_result,
+    screen_industry_leaders, screen_hk, load_quick_results, save_quick_result,
 )
+from stockwise.backtest import run_backtest
 
 
 @click.group(invoke_without_command=True)
@@ -138,7 +139,7 @@ def _run_analyze(code, hk, no_llm, no_validate, no_governance, no_holders, brief
         idx = report.find(marker)
         if idx > 0:
             report = report[:idx].rstrip() + "\n"
-    path = write(report, sid.code, cfg.report_dir)
+    path = write(report, sid.code, cfg.report_dir, name=snapshot.profile.name)
 
     final = base_result
     if llm is not None:
@@ -281,13 +282,19 @@ def watch_run(no_llm: bool, brief: bool, out: Path | None):
 @click.option("--min-score", type=int, default=None,
               help="只显示 quick_score ≥ N 的标的")
 @click.option("--to-watchlist", is_flag=True, help="将筛选结果加入 watchlist")
+@click.option("--to-deep", is_flag=True,
+              help="对筛选 top N 自动跑完整深度分析（含 LLM），并加入 watchlist")
 @click.option("--from-cache", is_flag=True, help="只查询 SQLite 已扫描结果，不重新扫描")
 @click.option("--cache-only", is_flag=True,
               help="跳过 baostock 净利润拉取，仅用已缓存数据。首次跑后秒回")
 @click.option("--list-industries", is_flag=True, help="列出所有可用行业及成分股数")
+@click.option("--hk", is_flag=True, help="筛选港股（从 80+ 恒生主流标的池）")
+@click.option("--heatmap", "heatmap_path", type=click.Path(path_type=Path), default=None,
+              help="生成 HTML 热图（行业 × 标的二维表）到指定路径")
 def screen(top_n: int, include: Optional[str], exclude: Optional[str], workers: int,
-           show_top: int, min_score: Optional[int], to_watchlist: bool, from_cache: bool,
-           cache_only: bool, list_industries: bool):
+           show_top: int, min_score: Optional[int], to_watchlist: bool, to_deep: bool,
+           from_cache: bool, cache_only: bool, list_industries: bool, hk: bool,
+           heatmap_path: Optional[Path]):
     """按行业 top N 扫描 A 股，30 分制粗筛打分。"""
     if list_industries:
         from stockwise.industry import list_industries as _list
@@ -319,11 +326,17 @@ def screen(top_n: int, include: Optional[str], exclude: Optional[str], workers: 
             click.echo(f"\r[{'拉取净利润' if phase=='industry' else 'Quick scan'}] {done}/{total}",
                        nl=False)
 
-    results = screen_industry_leaders(
-        top_n=top_n, industry_filter=industry_filter,
-        exclude=exclude_list, workers=workers, progress_cb=progress_cb,
-        cache_only=cache_only,
-    )
+    if hk:
+        results = screen_hk(
+            top_n=top_n, industry_filter=industry_filter,
+            exclude=exclude_list, progress_cb=progress_cb,
+        )
+    else:
+        results = screen_industry_leaders(
+            top_n=top_n, industry_filter=industry_filter,
+            exclude=exclude_list, workers=workers, progress_cb=progress_cb,
+            cache_only=cache_only,
+        )
     click.echo()  # newline after progress
     if not results:
         click.secho("无结果（可能行业过滤过严或 baostock 接口失败）", fg="yellow")
@@ -342,11 +355,32 @@ def screen(top_n: int, include: Optional[str], exclude: Optional[str], workers: 
     if to_watchlist:
         _add_quick_results_to_watchlist(shown)
 
+    if heatmap_path:
+        from stockwise.visualize import render_heatmap
+        title = "stockwise 港股头部筛选" if hk else "stockwise A 股头部筛选"
+        path = render_heatmap(results, heatmap_path, title=title)
+        click.secho(f"✓ 热图已生成：{path.resolve()}", fg="green")
+
+    if to_deep:
+        click.echo(f"\n[深度分析] 对筛选出的 {len(shown)} 只标的批量跑完整分析…")
+        _add_quick_results_to_watchlist(shown)
+        for r in shown:
+            click.echo(f"\n========== {r.code} {r.name} ==========")
+            try:
+                _run_analyze(
+                    r.code, hk=False, no_llm=False, no_validate=False,
+                    no_governance=False, no_holders=False, brief=False, out=None,
+                )
+            except SystemExit:
+                click.secho(f"  跳过 {r.code}", fg="yellow")
+                continue
+        click.secho(f"\n✓ 深度分析完成，共 {len(shown)} 份报告", fg="green")
+
 
 def _print_quick_results(results) -> None:
     click.echo()
     click.echo(f"{'代码':<8} {'名称':<12} {'行业':<26} {'排名':<4} "
-               f"{'PE':>6} {'PB':>5} {'ROE':>6} {'负债':>5} {'FCF/股':>7} "
+               f"{'PE':>6} {'PB':>5} {'ROE':>6} {'负债':>5} {'CFO/NP':>7} "
                f"{'Score':>6}  说明")
     click.echo("-" * 130)
     for r in results:
@@ -354,11 +388,11 @@ def _print_quick_results(results) -> None:
         pb = f"{r.pb:.2f}" if r.pb else "—"
         roe = f"{r.roe_5y:.1f}%" if r.roe_5y else "—"
         debt = f"{r.debt_ratio:.0f}%" if r.debt_ratio is not None else "—"
-        fcf = f"{r.fcf_per_share:.2f}" if r.fcf_per_share is not None else "—"
+        cfo = f"{r.cfo_to_np:.2f}" if r.cfo_to_np is not None else "—"
         ind = (r.industry or "—")[:24]
         flags = " ".join(r.quick_flags)[:40]
         click.echo(f"{r.code:<8} {r.name[:10]:<12} {ind:<26} #{r.industry_rank:<3} "
-                   f"{pe:>6} {pb:>5} {roe:>6} {debt:>5} {fcf:>7} "
+                   f"{pe:>6} {pb:>5} {roe:>6} {debt:>5} {cfo:>7} "
                    f"{r.quick_score:>3}/30  {flags}")
 
 
@@ -396,6 +430,83 @@ def _add_results_to_watchlist(rows) -> None:
             added += 1
     wl.save()
     click.secho(f"✓ 加入 watchlist {added} 只（重复的跳过）", fg="green")
+
+
+# ============================================================================
+# backtest 子命令
+# ============================================================================
+
+@cli.command()
+@click.option("--as-of", required=True,
+              help="回测起点日期 YYYY-MM-DD，如 2024-12-31")
+@click.option("--horizon", default=None,
+              help="终点日期，默认今天")
+@click.option("--from-screen", is_flag=True,
+              help="使用 SQLite 中最新 screen 结果作为标的池")
+@click.option("--from-watchlist", is_flag=True,
+              help="使用 watchlist 作为标的池")
+@click.option("--codes", default=None,
+              help="自定义标的代码列表，逗号分隔（如 600519,600036,000858）")
+@click.option("--min-score", type=int, default=None,
+              help="仅从 screen 中取 quick_score ≥ N 的标的")
+def backtest(as_of: str, horizon: Optional[str], from_screen: bool,
+             from_watchlist: bool, codes: Optional[str], min_score: Optional[int]):
+    """回测：从指定日期持有筛选标的至今的收益（含与沪深 300 对比）。"""
+    # 准备标的池
+    pool: list[tuple[str, str]] = []
+    quick_scores: dict = {}
+
+    if codes:
+        for c in codes.split(","):
+            c = c.strip()
+            if c:
+                pool.append((c, c))
+    elif from_watchlist:
+        wl = Watchlist.load()
+        for i in wl.items:
+            pool.append((i.code, i.name or i.code))
+    elif from_screen:
+        rows = load_quick_results(min_score=min_score, limit=200)
+        for d in rows:
+            pool.append((d["code"], d.get("name") or d["code"]))
+            quick_scores[d["code"]] = d.get("quick_score")
+    else:
+        click.secho("请指定 --from-screen / --from-watchlist / --codes 之一", fg="red")
+        sys.exit(2)
+
+    if not pool:
+        click.secho("标的池为空", fg="red")
+        sys.exit(2)
+
+    click.echo(f"[回测] 起点 {as_of} → 终点 {horizon or '今天'}，{len(pool)} 只标的")
+    result = run_backtest(as_of, pool, horizon, quick_scores=quick_scores)
+    if result.error:
+        click.secho(f"失败：{result.error}", fg="red")
+        return
+
+    _print_backtest(result)
+
+
+def _print_backtest(result) -> None:
+    click.echo()
+    click.echo(f"{'代码':<8} {'名称':<14} {'Score':>6} {'起点价':>9} {'终点价':>9} {'收益率':>8}")
+    click.echo("-" * 70)
+    rows_sorted = sorted(result.rows, key=lambda r: r.return_pct or -999, reverse=True)
+    for r in rows_sorted:
+        score = f"{r.quick_score}/30" if r.quick_score else "—"
+        ps = f"{r.price_start:.2f}" if r.price_start else "—"
+        pe = f"{r.price_end:.2f}" if r.price_end else "—"
+        ret = f"{r.return_pct:+.1f}%" if r.return_pct is not None else "—"
+        click.echo(f"{r.code:<8} {r.name[:12]:<14} {score:>6} {ps:>9} {pe:>9} {ret:>8}")
+    click.echo("-" * 70)
+    if result.portfolio_return is not None:
+        click.secho(f"等权组合收益率：{result.portfolio_return:+.2f}%", fg="green", bold=True)
+    if result.benchmark_return is not None:
+        click.echo(f"{result.benchmark_label}：{result.benchmark_return:+.2f}%")
+    alpha = result.alpha
+    if alpha is not None:
+        color = "green" if alpha > 0 else "red"
+        click.secho(f"超额收益 alpha：{alpha:+.2f}%", fg=color, bold=True)
 
 
 # 兼容老入口
