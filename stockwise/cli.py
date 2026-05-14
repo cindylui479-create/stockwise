@@ -364,17 +364,41 @@ def screen(top_n: int, include: Optional[str], exclude: Optional[str], workers: 
     if to_deep:
         click.echo(f"\n[深度分析] 对筛选出的 {len(shown)} 只标的批量跑完整分析…")
         _add_quick_results_to_watchlist(shown)
+        import re
+        import subprocess
+        wl = Watchlist.load()
+        done = failed = timeout = 0
         for r in shown:
             click.echo(f"\n========== {r.code} {r.name} ==========")
+            cmd = ["python3", "-m", "stockwise", r.code]
             try:
-                _run_analyze(
-                    r.code, hk=False, no_llm=False, no_validate=False,
-                    no_governance=False, no_holders=False, brief=False, out=None,
-                )
-            except SystemExit:
-                click.secho(f"  跳过 {r.code}", fg="yellow")
-                continue
-        click.secho(f"\n✓ 深度分析完成，共 {len(shown)} 份报告", fg="green")
+                proc = subprocess.run(cmd, timeout=180, check=False,
+                                       capture_output=True, text=True)
+                if proc.stdout:
+                    click.echo(proc.stdout, nl=False)
+                done += 1
+                # 解析评级 / 得分 / 安全边际 / 行动建议，回填 watchlist
+                rating_m = re.search(r"评级：(\S+)\s+得分\s+(\d+)/100\s+安全边际：(\S+)", proc.stdout)
+                action_m = re.search(r"行动建议：(.+)", proc.stdout)
+                if rating_m:
+                    wl.update_result(
+                        r.code,
+                        rating=rating_m.group(1),
+                        score=int(rating_m.group(2)),
+                        margin=rating_m.group(3),
+                        action=action_m.group(1).strip() if action_m else "—",
+                        name=r.name,
+                    )
+            except subprocess.TimeoutExpired:
+                click.secho(f"  ⚠ {r.code} 超过 180s 超时，跳过", fg="yellow")
+                timeout += 1
+            except Exception as e:
+                click.secho(f"  ⚠ {r.code} 出错：{e}", fg="yellow")
+                failed += 1
+        wl.save()
+        click.secho(f"\n✓ 深度分析批次完成：成功 {done}，超时 {timeout}，失败 {failed}",
+                    fg="green")
+        click.echo("  watchlist 已更新最新评级，运行 `stockwise watch list` 查看")
 
 
 def _print_quick_results(results) -> None:
