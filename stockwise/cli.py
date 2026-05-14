@@ -226,37 +226,64 @@ def watch_list():
 @click.option("--brief", is_flag=True, help="只生成快读版报告")
 @click.option("--out", type=click.Path(file_okay=False, path_type=Path), default=None)
 def watch_run(no_llm: bool, brief: bool, out: Path | None):
-    """跑 watchlist 中所有股票，更新评级；标记发生变化的标的。"""
+    """跑 watchlist 中所有股票，更新评级；标记发生变化的标的。
+
+    用 subprocess 隔离每只单股 + 180s 超时，避免某只 hang 拖死整批。
+    """
+    import re
+    import subprocess
     wl = Watchlist.load()
     if not wl.items:
         click.echo("watchlist 为空。")
         return
     changes: list[str] = []
+    timeouts = failures = 0
     for item in wl.items:
-        click.echo(f"\n========== {item.code} ==========")
+        click.echo(f"\n========== {item.code} {item.name or ''} ==========")
+        cmd = ["python3", "-m", "stockwise", item.code]
+        if item.market == "HK":
+            cmd.append("--hk")
+        if no_llm:
+            cmd.append("--no-llm")
+        if brief:
+            cmd.append("--brief")
         try:
-            result = _run_analyze(
-                item.code, hk=(item.market == "HK"),
-                no_llm=no_llm, no_validate=False, no_governance=False,
-                no_holders=False, brief=brief, out=out,
-            )
-        except SystemExit:
-            click.secho(f"  跳过 {item.code}", fg="yellow")
+            proc = subprocess.run(cmd, timeout=180, check=False,
+                                   capture_output=True, text=True)
+            if proc.stdout:
+                click.echo(proc.stdout, nl=False)
+        except subprocess.TimeoutExpired:
+            click.secho(f"  ⚠ {item.code} 超过 180s 超时，跳过", fg="yellow")
+            timeouts += 1
             continue
+        except Exception as e:
+            click.secho(f"  ⚠ {item.code} 出错：{e}", fg="yellow")
+            failures += 1
+            continue
+        # 解析评级 / 得分 / 安全边际 / 行动建议
+        out_text = proc.stdout
+        rating_m = re.search(r"评级：(\S+)\s+得分\s+(\d+)/100\s+安全边际：(\S+)", out_text)
+        action_m = re.search(r"行动建议：(.+)", out_text)
+        if not rating_m:
+            failures += 1
+            continue
+        new_rating = rating_m.group(1)
+        new_score = int(rating_m.group(2))
+        new_margin = rating_m.group(3)
+        new_action = action_m.group(1).strip() if action_m else "—"
         # 检测变化
-        prev_action = item.last_action
-        prev_score = item.last_score
-        if prev_action and prev_action != result["action"]:
-            changes.append(f"⚠ {item.code} 行动建议：{prev_action} → {result['action']}")
-        elif prev_score is not None and abs(prev_score - result["score"]) >= 5:
-            changes.append(f"⚠ {item.code} 得分变化 ≥ 5：{prev_score} → {result['score']}")
+        if item.last_action and item.last_action != new_action:
+            changes.append(f"⚠ {item.code} {item.name or ''} 行动建议：{item.last_action} → {new_action}")
+        elif item.last_score is not None and abs(item.last_score - new_score) >= 5:
+            changes.append(f"⚠ {item.code} {item.name or ''} 得分 ≥5 变化：{item.last_score} → {new_score}")
         wl.update_result(
             item.code,
-            rating=result["rating"], score=result["score"],
-            action=result["action"], margin=result["margin"],
-            name=result["name"],
+            rating=new_rating, score=new_score, margin=new_margin,
+            action=new_action, name=item.name,
         )
     wl.save()
+    if timeouts or failures:
+        click.echo(f"\n超时 {timeouts} / 失败 {failures}")
     if changes:
         click.secho("\n\n== 评级变化（需关注） ==", fg="yellow", bold=True)
         for c in changes:
