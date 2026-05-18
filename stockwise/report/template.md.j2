@@ -66,6 +66,10 @@
 
 {% if llm and llm.main_business -%}
 {{ llm.main_business }}
+{% elif llm -%}
+*（LLM 已调用，但本节输出缺失或为空）*
+{% elif llm_error -%}
+⚠ **LLM 调用失败**：{{ llm_error }}
 {% else -%}
 （未启用 LLM 解读）
 {%- endif %}
@@ -76,6 +80,10 @@
 
 {% if llm and llm.moat_analysis -%}
 {{ llm.moat_analysis }}
+{% elif llm -%}
+*（LLM 已调用，但护城河章节输出缺失 — 参见上方巴菲特检查清单的财务证据）*
+{% elif llm_error -%}
+⚠ **LLM 调用失败**：{{ llm_error }}（仅按财务指标判断 — 参见上方检查清单）
 {% else -%}
 （未启用 LLM 解读，仅按财务指标判断 — 参见上方检查清单）
 {%- endif %}
@@ -181,6 +189,10 @@
 
 {% if llm and llm.management_note -%}
 **LLM 评分：{{ llm.management_quality }}/5** —— {{ llm.management_note }}
+{% elif llm -%}
+*（LLM 已调用，但管理层章节输出缺失）*
+{% elif llm_error -%}
+⚠ **LLM 调用失败**：{{ llm_error }}（管理层评分回落到中位分，准确度受限）
 {% else -%}
 （未启用 LLM）
 {%- endif %}
@@ -191,6 +203,10 @@
 
 {% if llm and llm.understandability_note -%}
 **LLM 评分：{{ llm.business_understandability }}/5** —— {{ llm.understandability_note }}
+{% elif llm -%}
+*（LLM 已调用，但业务可理解性章节输出缺失）*
+{% elif llm_error -%}
+⚠ **LLM 调用失败**：{{ llm_error }}（能力圈判定回落到中位分，请人工核对业务复杂度）
 {% else -%}
 （未启用 LLM）
 {%- endif %}
@@ -201,6 +217,10 @@
 
 {% if llm and llm.inversion -%}
 {{ llm.inversion }}
+{% elif llm -%}
+*（LLM 已调用，但 Munger 反向思考章节输出缺失）*
+{% elif llm_error -%}
+⚠ **LLM 调用失败**：{{ llm_error }}（无定性反向分析）
 {% else -%}
 （未启用 LLM；无定性反向分析）
 {%- endif %}
@@ -227,6 +247,8 @@
 *（LLM 未给出独立的 verdict 段落，复用其内在价值判断作为总结）*
 
 {{ llm.intrinsic_value_view }}
+{% elif llm_error -%}
+⚠ LLM 调用失败：{{ llm_error }}。仅按规则得分 {{ score.total }} 分，评级：**{{ score.rating }}**，安全边际：{{ score.margin_of_safety }}。
 {% else -%}
 未启用 LLM。规则得分 {{ score.total }} 分，评级：**{{ score.rating }}**，安全边际：{{ score.margin_of_safety }}。
 {%- endif %}

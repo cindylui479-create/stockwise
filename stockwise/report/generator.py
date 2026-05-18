@@ -47,11 +47,13 @@ def _format_num(value: Optional[float]) -> str:
     return f"{value:.2f}"
 
 
-def render(snapshot: StockSnapshot, base_score: ScoreResult, llm: Optional[LLMAnalysis]) -> str:
+def render(snapshot: StockSnapshot, base_score: ScoreResult,
+           llm: Optional[LLMAnalysis], llm_error: Optional[str] = None) -> str:
     """生成 Markdown 报告。
 
     若 LLM 给出 business_understandability / management_quality，
     把它们替代默认中位分，重算总分与评级。
+    llm_error：LLM 调用失败时的错误描述。模板用它区分「未启用」vs「调用失败」。
     """
     final_score = _merge_score_with_llm(snapshot, base_score, llm)
     template = _env.get_template("template.md.j2")
@@ -74,6 +76,7 @@ def render(snapshot: StockSnapshot, base_score: ScoreResult, llm: Optional[LLMAn
         news=snapshot.news,
         score=final_score,
         llm=llm,
+        llm_error=llm_error,
         buyout=buyout,
         format_money=_format_money,
         format_price=_format_price,

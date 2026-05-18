@@ -105,12 +105,14 @@ def _run_analyze(code, hk, no_llm, no_validate, no_governance, no_holders, brief
         click.secho(f"      ⚠ 触发一票否决：{'; '.join(base_result.vetoes)}", fg="yellow")
 
     llm: LLMAnalysis | None = None
+    llm_error: str | None = None
     if not no_llm:
         if not cfg.llm.usable:
             click.secho(
                 "警告：未配置 LLM API key，跳过 LLM 解读",
                 fg="yellow", err=True,
             )
+            llm_error = "未配置 LLM API key"
         else:
             provider_label = {
                 "anthropic": "Anthropic",
@@ -129,11 +131,12 @@ def _run_analyze(code, hk, no_llm, no_validate, no_governance, no_holders, brief
             except Exception as e:
                 click.secho(f"      LLM 调用失败：{e}（继续以规则结果生成报告）", fg="yellow", err=True)
                 llm = None
+                llm_error = f"{type(e).__name__}: {e}"
     else:
         click.echo("[3/4] 跳过 LLM 解读 (--no-llm)")
 
     click.echo(f"[4/4] 生成 Markdown 报告 …")
-    report = render(snapshot, base_result, llm)
+    report = render(snapshot, base_result, llm, llm_error=llm_error)
     if brief:
         marker = "## 综合判断"
         idx = report.find(marker)
@@ -228,7 +231,7 @@ def watch_list():
 def watch_run(no_llm: bool, brief: bool, out: Path | None):
     """跑 watchlist 中所有股票，更新评级；标记发生变化的标的。
 
-    用 subprocess 隔离每只单股 + 180s 超时，避免某只 hang 拖死整批。
+    用 subprocess 隔离每只单股 + 480s 超时（含 LLM 调用上限 120s × 1 次重试 + 数据采集 + 余量）。
     """
     import re
     import subprocess
@@ -248,12 +251,12 @@ def watch_run(no_llm: bool, brief: bool, out: Path | None):
         if brief:
             cmd.append("--brief")
         try:
-            proc = subprocess.run(cmd, timeout=180, check=False,
+            proc = subprocess.run(cmd, timeout=480, check=False,
                                    capture_output=True, text=True)
             if proc.stdout:
                 click.echo(proc.stdout, nl=False)
         except subprocess.TimeoutExpired:
-            click.secho(f"  ⚠ {item.code} 超过 180s 超时，跳过", fg="yellow")
+            click.secho(f"  ⚠ {item.code} 超过 480s 超时，跳过", fg="yellow")
             timeouts += 1
             continue
         except Exception as e:
@@ -399,7 +402,7 @@ def screen(top_n: int, include: Optional[str], exclude: Optional[str], workers: 
             click.echo(f"\n========== {r.code} {r.name} ==========")
             cmd = ["python3", "-m", "stockwise", r.code]
             try:
-                proc = subprocess.run(cmd, timeout=180, check=False,
+                proc = subprocess.run(cmd, timeout=300, check=False,
                                        capture_output=True, text=True)
                 if proc.stdout:
                     click.echo(proc.stdout, nl=False)
@@ -417,7 +420,7 @@ def screen(top_n: int, include: Optional[str], exclude: Optional[str], workers: 
                         name=r.name,
                     )
             except subprocess.TimeoutExpired:
-                click.secho(f"  ⚠ {r.code} 超过 180s 超时，跳过", fg="yellow")
+                click.secho(f"  ⚠ {r.code} 超过 480s 超时，跳过", fg="yellow")
                 timeout += 1
             except Exception as e:
                 click.secho(f"  ⚠ {r.code} 出错：{e}", fg="yellow")

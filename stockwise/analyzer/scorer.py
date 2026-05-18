@@ -6,7 +6,10 @@
   - insurance: 保险业（看 ROE / P/B / 股息率 / 净利稳定性）
 
 7 个维度（总分 100）：
-  护城河 25 + 盈利质量 20 + 资本配置 15 + 长期增长 10 + 安全边际 20 + 业务可理解 5 + 管理层 5
+  护城河 25 + 盈利质量 20 + 资本配置 15 + 长期增长 5 + 安全边际 20 + 业务可理解 10 + 管理层 5
+
+v0.7 调整：能力圈权重从 5 → 10（巴菲特"看不懂的不买"），长期增长从 10 → 5
+（增长本身不构成好生意，护城河 25 已覆盖；价值投资者更怕"看不懂"）。
 """
 from __future__ import annotations
 
@@ -43,9 +46,9 @@ DIMENSION_CAPS = {
     "护城河": 25,
     "盈利质量": 20,
     "资本配置": 15,
-    "长期增长": 10,
+    "长期增长": 5,
     "安全边际": 20,
-    "业务可理解性": 5,
+    "业务可理解性": 10,
     "管理层质量": 5,
 }
 
@@ -79,8 +82,9 @@ def score(snapshot: StockSnapshot,
         "管理层质量": mgmt_pts,
     }
     total = sum(dims.values())
-    rating = _rating(total, iv.margin_of_safety, vetoes)
-    action = _action(total, iv.discount, vetoes, snapshot.governance)
+    rating = _rating(total, iv.discount, vetoes)
+    action = _action(total, iv.discount, vetoes, snapshot.governance,
+                     llm_business_score=llm_business_score)
 
     flags = [*moat_flags, *quality_flags, *capital_flags, *growth_flags, *safety_flags]
     if biz_note:
@@ -612,7 +616,8 @@ def _score_growth(fin: Financials, view: str = "default"):
             if profit_series[0] < profit_series[1]:
                 flags.append(f"最近一年净利回落（{profit_series[1]/1e8:.0f}亿 → {profit_series[0]/1e8:.0f}亿）")
 
-    return min(pts, 10), flags, reasons, checklist
+    # v0.7：长期增长 cap 从 10 → 5（增长本身不构成好生意），按比例缩到 0-5
+    return min((pts + 1) // 2, 5), flags, reasons, checklist
 
 
 # ---------------------------------------------------------------------------
@@ -665,9 +670,13 @@ def _score_safety(iv: IntrinsicValue):
 # ---------------------------------------------------------------------------
 
 def _score_business(score_0_5: Optional[int]) -> tuple[int, str]:
+    """业务可理解性：LLM 给 0-5，本维度满分 10（v0.7 升权）。
+
+    缺 LLM → 6/10（约 60%，与原 3/5 比率一致；但缺少能力圈判断会在 _action 处提醒）。
+    """
     if score_0_5 is None:
-        return 3, "业务可理解性：未启用 LLM，给中位分"
-    return max(0, min(5, score_0_5)), ""
+        return 6, "业务可理解性：未启用 LLM，给中位分（能力圈判定缺失）"
+    return max(0, min(10, score_0_5 * 2)), ""
 
 
 def _score_management(score_0_5: Optional[int]) -> tuple[int, str]:
@@ -681,11 +690,13 @@ def _score_management(score_0_5: Optional[int]) -> tuple[int, str]:
 # ---------------------------------------------------------------------------
 
 def _action(total: int, discount: Optional[float], vetoes: list[str],
-            governance) -> str:
+            governance, llm_business_score: Optional[int] = None) -> str:
     """独立于质量评级的"具体行动建议"。
 
     决策矩阵：
       - 一票否决 → "避免，不研究"
+      - 业务可理解性 = 0（LLM 判完全看不懂）→ "避免（业务不在能力圈内）"
+      - 业务可理解性 ≤ 1 + total ≥ 70 → 强制降档到"观察（能力圈外）"
       - 质量 < 50 → "避免"
       - 质量 50-70 → "观察，不建议新仓"
       - 质量 ≥ 70 + 折价 ≥ 30% → "可以入场（折价充足）"
@@ -694,8 +705,13 @@ def _action(total: int, discount: Optional[float], vetoes: list[str],
       - 质量 ≥ 70 + 折价 < -10% → "等待回调（估值偏贵）"
     若 governance 含红旗事件，所有建议追加 "警惕治理事件"
     """
+    # 能力圈兜底（巴菲特：看不懂的不买）—— 在 veto 之后、其他档之前
     if vetoes:
         base = "避免（触发一票否决）"
+    elif llm_business_score is not None and llm_business_score == 0:
+        base = "避免（业务不在能力圈内）"
+    elif llm_business_score is not None and llm_business_score <= 1 and total >= 70:
+        base = "观察（业务可理解性极低，能力圈外）"
     elif total < 50:
         base = "避免（基本面不达标）"
     elif total < 70:
@@ -716,27 +732,31 @@ def _action(total: int, discount: Optional[float], vetoes: list[str],
     return base
 
 
-def _rating(total: int, mos: str, vetoes: list[str]) -> str:
-    """5 档标签 + 否决档：
+def _rating(total: int, discount: Optional[float], vetoes: list[str]) -> str:
+    """5 档标签 + 否决档。
 
-      ≥85 + 充足          → 值得长期持有
-      ≥85 + 一般          → 优质合理估值
-      ≥85 + 不足/偏贵     → 优质但偏贵
-      70-84 + 充足/一般   → 质量好且估值合理
-      70-84 + 不足/偏贵   → 质量好但有瑕疵
-      <70                 → 未达伯克希尔标准
-      一票否决            → 避免
+    v0.7：直接用 discount % 连续阈值驱动，避免 "不足/一般" 4 档 enum 在 +9% vs +11%
+    这种边界处把评级砍掉一档（泸州老窖 82 分 + 折价 +10% 误降的根因）。
+
+      veto                          → 避免
+      ≥85 + discount ≥ 20%          → 值得长期持有
+      ≥85 + discount ≥  0%          → 优质合理估值
+      ≥85 + discount <  0%          → 优质但偏贵
+      70-84 + discount ≥  0%        → 质量好且估值合理
+      70-84 + discount <  0%        → 质量好但有瑕疵
+      < 70                          → 未达伯克希尔标准
     """
     if vetoes:
         return "避免"
+    d = 0.0 if discount is None else discount
     if total >= 85:
-        if mos == "充足":
+        if d >= 20:
             return "值得长期持有"
-        if mos == "一般":
+        if d >= 0:
             return "优质合理估值"
         return "优质但偏贵"
     if total >= 70:
-        if mos in ("充足", "一般"):
+        if d >= 0:
             return "质量好且估值合理"
         return "质量好但有瑕疵"
     return "未达伯克希尔标准"

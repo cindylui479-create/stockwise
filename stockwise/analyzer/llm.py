@@ -123,9 +123,9 @@ def _call_anthropic(llm: LLMConfig, user_payload: str) -> str:
         kwargs["api_key"] = llm.api_key
     if llm.base_url:
         kwargs["base_url"] = llm.base_url
-    client_opts = _http_client_kwargs(llm)
-    if client_opts is not None:
-        kwargs["http_client"] = client_opts
+    kwargs["http_client"] = _http_client_kwargs(llm)
+    # max_retries=1 防 SDK 默认 2 次重试 × 120s 把 subprocess 顶过 timeout
+    kwargs["max_retries"] = 1
     client = anthropic.Anthropic(**kwargs)
 
     response = client.messages.create(
@@ -156,9 +156,8 @@ def _call_openai(llm: LLMConfig, user_payload: str) -> str:
     kwargs: dict = {"api_key": llm.api_key}
     if llm.base_url:
         kwargs["base_url"] = llm.base_url
-    client_opts = _http_client_kwargs(llm)
-    if client_opts is not None:
-        kwargs["http_client"] = client_opts
+    kwargs["http_client"] = _http_client_kwargs(llm)
+    kwargs["max_retries"] = 1
     client = OpenAI(**kwargs)
 
     response = client.chat.completions.create(
@@ -173,13 +172,12 @@ def _call_openai(llm: LLMConfig, user_payload: str) -> str:
 
 
 def _http_client_kwargs(llm: LLMConfig):
-    if not llm.insecure_ssl and llm.trust_env:
-        return None
+    # 始终返回带 timeout 的 httpx.Client，避免 SDK 默认无限等待把 subprocess 拖死
     import httpx
     return httpx.Client(
         verify=not llm.insecure_ssl,
         trust_env=llm.trust_env,
-        timeout=180,
+        timeout=httpx.Timeout(connect=10.0, read=120.0, write=30.0, pool=10.0),
     )
 
 
