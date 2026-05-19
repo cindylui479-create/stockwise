@@ -12,7 +12,7 @@
 | **评级** | **{{ score.rating }}**（{{ score.total }}/100） |
 | **行动建议** | **{{ score.action }}** |
 | **安全边际** | {{ score.margin_of_safety }}{% if intrinsic.discount is not none %}（折价 {{ "%+.0f" | format(intrinsic.discount) }}%）{% endif %} |
-| **评估口径** | {% if score.industry_view == 'bank' %}银行业版{% elif score.industry_view == 'insurance' %}保险业版{% elif score.industry_view == 'growth' %}成长股版{% elif score.industry_view == 'cyclical' %}周期股版{% else %}默认（消费/制造）{% endif %} |
+| **评估口径** | {% if score.industry_view == 'bank' %}银行业版{% elif score.industry_view == 'insurance' %}保险业版{% elif score.industry_view == 'growth' %}成长股版{% elif score.industry_view == 'semi_growth' %}半成长版{% elif score.industry_view == 'cyclical' %}周期股版{% else %}默认（消费/制造）{% endif %} |
 | **当前价 / 内在价值** | {{ format_price(profile.current_price, profile.currency) }} / {% if intrinsic.fair_value and profile.shares %}{{ format_price(intrinsic.fair_value / profile.shares, profile.currency) }}{% else %}—{% endif %} |
 {% if score.vetoes -%}
 | ⚠️ **一票否决** | {{ score.vetoes | join('；') }} |
@@ -26,7 +26,7 @@
 ## 综合判断
 
 **{{ score.rating }}** （综合得分 {{ score.total }} / 100，安全边际：**{{ score.margin_of_safety }}**，
-评估口径：{% if score.industry_view == 'bank' %}银行业版{% elif score.industry_view == 'insurance' %}保险业版{% elif score.industry_view == 'growth' %}成长股版{% elif score.industry_view == 'cyclical' %}周期股版{% else %}默认（消费/制造）{% endif %}）
+评估口径：{% if score.industry_view == 'bank' %}银行业版{% elif score.industry_view == 'insurance' %}保险业版{% elif score.industry_view == 'growth' %}成长股版{% elif score.industry_view == 'semi_growth' %}半成长版{% elif score.industry_view == 'cyclical' %}周期股版{% else %}默认（消费/制造）{% endif %}）
 
 > **行动建议**：{{ score.action }}
 
@@ -135,6 +135,8 @@
 > 评估口径：**保险业版**（P/B + 股息率 + 净利稳定性）
 {% elif intrinsic.industry_view == 'growth' -%}
 > 评估口径：**成长股版**（林奇 GARP：PEG + 隐含回报 + PS÷增长率 + DCF 含增长）
+{% elif intrinsic.industry_view == 'semi_growth' -%}
+> 评估口径：**半成长版**（CAGR 12-15% 中等成长：4 道关同 default，维度门槛放宽至 ROE 12% / 毛利 30% / 净利 CAGR 12%）
 {% elif intrinsic.industry_view == 'cyclical' -%}
 > 评估口径：**周期股版**（Shiller CAPE：10 年平均 EPS + P/B + 高股息率 + 周期顶部预警）
 {% else -%}

@@ -182,7 +182,64 @@ def _score_moat(fin: Financials, view: str = "default"):
         return _score_moat_insurance(fin)
     if view == "growth":
         return _score_moat_growth(fin)
+    if view == "semi_growth":
+        return _score_moat_semi_growth(fin)
     return _score_moat_default(fin)
+
+
+def _score_moat_semi_growth(fin: Financials):
+    """半成长护城河（v0.8）：default 严格门槛对中等成长企业过严。
+
+    ROE ≥ 12% 给 10 分（default 15%）；毛利 ≥ 30% 给 6 分（default 40%）；
+    其余保留 default 的稳定性子项。
+    """
+    flags: list[str] = []
+    reasons: list[str] = []
+    checklist: list[tuple[str, bool, str]] = []
+    if not fin.annual:
+        return 0, ["财务数据缺失"], [], []
+    last5 = fin.annual[:5]
+    pts = 0
+
+    roes = [p.roe for p in last5 if p.roe is not None]
+    if roes:
+        roe_avg = sum(roes) / len(roes)
+        if roe_avg >= 12:
+            pts += 10
+            reasons.append(f"近 5 年平均 ROE {roe_avg:.1f}%（半成长门槛 12%）")
+            checklist.append(("ROE 5 年均值 ≥ 12%（半成长门槛）", True, f"{roe_avg:.1f}%"))
+        elif roe_avg >= 9:
+            pts += 5
+            checklist.append(("ROE 5 年均值 ≥ 12%", False, f"{roe_avg:.1f}%"))
+        else:
+            checklist.append(("ROE 5 年均值 ≥ 12%", False, f"{roe_avg:.1f}%"))
+        if all(r >= 10 for r in roes):
+            pts += 5
+            checklist.append(("每年 ROE 都 ≥ 10%", True, f"近 5 年最低 {min(roes):.1f}%"))
+        else:
+            checklist.append(("每年 ROE 都 ≥ 10%", False, f"近 5 年最低 {min(roes):.1f}%"))
+
+    gms = [p.gross_margin for p in last5 if p.gross_margin is not None]
+    if gms:
+        gm_avg = sum(gms) / len(gms)
+        if gm_avg >= 30:
+            pts += 6
+            checklist.append(("毛利率 5 年均值 ≥ 30%（半成长门槛）", True, f"{gm_avg:.1f}%"))
+        elif gm_avg >= 20:
+            pts += 3
+            checklist.append(("毛利率 5 年均值 ≥ 30%", False, f"{gm_avg:.1f}%"))
+        else:
+            checklist.append(("毛利率 5 年均值 ≥ 30%", False, f"{gm_avg:.1f}%"))
+        import statistics as _st
+        if len(gms) >= 3 and gm_avg > 0:
+            cv = _st.pstdev(gms) / gm_avg
+            if cv < 0.15:
+                pts += 4
+                checklist.append(("毛利率波动率 < 15%", True, f"std/mean = {cv*100:.1f}%"))
+            else:
+                checklist.append(("毛利率波动率 < 15%", False, f"std/mean = {cv*100:.1f}%"))
+
+    return min(pts, 25), flags, reasons, checklist
 
 
 def _score_moat_growth(fin: Financials):
@@ -577,13 +634,16 @@ def _score_growth(fin: Financials, view: str = "default"):
     pts = 0
 
     # 行业差异化门槛：
-    #   银行/保险 — 增速低 → 8%
-    #   成长股   — 高速增长 → 25% 净利、20% 营收
-    #   默认     — 10% 净利、5% 营收
+    #   银行/保险    — 增速低 → 8%
+    #   成长股       — 高速增长 → 25% 净利、20% 营收
+    #   半成长 (v0.8)— 中等增长 → 12% 净利、8% 营收
+    #   默认         — 10% 净利、5% 营收
     if view in ("bank", "insurance"):
         profit_thr, rev_thr = 8, 5
     elif view == "growth":
         profit_thr, rev_thr = 25, 20
+    elif view == "semi_growth":
+        profit_thr, rev_thr = 12, 8
     else:
         profit_thr, rev_thr = 10, 5
 

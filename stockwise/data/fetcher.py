@@ -334,10 +334,19 @@ def _a_dividends(code: str, fin: Financials) -> DividendInfo:
         else:
             break
 
-    # TTM 派息：除权日落在最近 365 天内的所有派息求和（每 10 股）
-    cutoff = pd.Timestamp.now() - pd.Timedelta(days=365)
-    ttm = float(df[df["除权日"] >= cutoff]["派息"].sum())
-    ttm_per_10 = ttm if ttm > 0 else None
+    # 派息额（每 10 股）：取"近 1 个完整财务年度"的总额（v0.8 改正）
+    # 旧实现按"除权日近 365 天"求和，在年中跨财年会把当年中期派息 + 上一年年报派息混在一起，
+    # 导致泸州老窖等"2026 派 13.58 vs 2025 派 59.5" 4 倍跳变。
+    # 现在：找 history 中 year < 当前年 的最近一项；当前年≥10 月时用当年（年内派息基本完成）。
+    now = pd.Timestamp.now()
+    ttm_per_10 = None
+    for rec in history:
+        if rec.year < now.year:
+            ttm_per_10 = rec.cash_per_10_shares
+            break
+        if rec.year == now.year and now.month >= 10:
+            ttm_per_10 = rec.cash_per_10_shares
+            break
 
     return DividendInfo(
         history=history,
@@ -627,7 +636,26 @@ def classify_industry_view(industry: Optional[str], fin: Optional["Financials"] 
         if not any(k in industry for k in _NON_GROWTH_KEYS):
             return "growth"
 
+    # semi_growth (v0.8)：CAGR 12-15% + 毛利 5y均 ≥ 30% + 非排除类
+    #   覆盖再投资期/中等成长的优质消费医药等（ROE 12-18%、稳定毛利）。
+    #   避免 default profile 的 ROE ≥ 15% 严格门槛误杀。
+    #   估值仍用 default 4 道关，仅放宽维度评分门槛。
+    if cagr is not None and 0.12 <= cagr < 0.15:
+        if not any(k in industry for k in _NON_GROWTH_KEYS):
+            gm_avg = _gross_margin_5y_avg(fin)
+            if gm_avg is not None and gm_avg >= 30:
+                return "semi_growth"
+
     return "default"
+
+
+def _gross_margin_5y_avg(fin: Optional["Financials"]) -> Optional[float]:
+    if fin is None:
+        return None
+    gms = [p.gross_margin for p in fin.annual[:5] if p.gross_margin is not None]
+    if len(gms) < 3:
+        return None
+    return sum(gms) / len(gms)
 
 
 def _industry_rev_cagr(fin: Optional["Financials"]) -> Optional[float]:
@@ -662,6 +690,7 @@ def compute_intrinsic_value(profile: CompanyProfile, fin: Financials, val: Valua
     elif view == "cyclical":
         iv = _iv_cyclical(profile, fin, val, dividends)
     else:
+        # semi_growth 走 default 估值口径（FCF/Graham/OE/DCF），仅维度评分门槛不同
         iv = _iv_default(profile, fin, val)
     iv.industry_view = view
     iv.market_cap = profile.total_market_cap
