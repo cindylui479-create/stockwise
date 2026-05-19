@@ -3,6 +3,9 @@
 不是严格意义的"历史回测"（需要在过去时点用当时的数据重新打分）；
 而是更朴素的"业绩复盘"：如果当时按 screen 出的列表持有，至今表现如何。
 
+v0.11 #50 加入"真历史回测"：在 as_of 时点截断财务数据 + 重跑 score()，
+验证工具评级的预测能力。
+
 回测对照：上证指数（sh.000001）/ 沪深 300（sh.000300）。
 """
 from __future__ import annotations
@@ -21,6 +24,10 @@ class BacktestRow:
     price_end: Optional[float] = None
     return_pct: Optional[float] = None
     quick_score: Optional[int] = None
+    # v0.11 真历史回测：as_of 时点的评级
+    historical_rating: Optional[str] = None
+    historical_score: Optional[int] = None
+    historical_action: Optional[str] = None
 
 
 @dataclass
@@ -42,8 +49,13 @@ class BacktestResult:
 
 def run_backtest(as_of: str, codes_with_names: list[tuple],
                  horizon_end: Optional[str] = None,
-                 quick_scores: Optional[dict] = None) -> BacktestResult:
-    """对一组股票计算 as_of → horizon_end 的收益率，并与沪深 300 对比。"""
+                 quick_scores: Optional[dict] = None,
+                 rerun_scoring: bool = False) -> BacktestResult:
+    """对一组股票计算 as_of → horizon_end 的收益率，并与沪深 300 对比。
+
+    rerun_scoring=True 启用真历史回测（v0.11 #50）：在 as_of 时点截断财务数据后
+    重跑 score()，给出当时的评级，便于验证"当时'值得长期持有'的标的"现在表现如何。
+    """
     from datetime import date, timedelta
 
     if horizon_end is None:
@@ -62,6 +74,15 @@ def run_backtest(as_of: str, codes_with_names: list[tuple],
         )
         if price_start and price_end and price_start > 0:
             row.return_pct = (price_end - price_start) / price_start * 100
+        # v0.11 真历史回测
+        if rerun_scoring:
+            try:
+                r, s, a = _score_at_as_of(code, as_of, price_start)
+                row.historical_rating = r
+                row.historical_score = s
+                row.historical_action = a
+            except Exception:
+                pass
         result.rows.append(row)
 
     # 等权平均收益
@@ -115,3 +136,45 @@ def _bs_price_at(bs_code: str, target_date: str) -> Optional[float]:
         return best_close
     return cached_call(f"baostock:price_at:{target_date}", bs_code, 24 * 30, _call,
                        cache_none=True)
+
+
+def _score_at_as_of(code: str, as_of: str, price_at_as_of: Optional[float]):
+    """v0.11 真历史回测：截断财务数据到 as_of 时点 + 重新打分。
+
+    实现：拉取当前财务，过滤掉 period > as_of 的报告期，重算 intrinsic + score。
+    简化处理：as_of 时点的市值用 price_at_as_of × shares 重新计算。
+    """
+    from stockwise.analyzer.scorer import score as score_fn
+    from stockwise.data.fetcher import fetch, compute_intrinsic_value
+    from stockwise.data.market import parse_code
+    from datetime import datetime
+
+    sid = parse_code(code)
+    snap = fetch(sid, validate=False, governance=False, holders=False)
+
+    # 截断 financials 到 as_of 之前
+    as_of_dt = datetime.strptime(as_of, "%Y-%m-%d")
+    truncated_annual = []
+    for p in snap.financials.annual:
+        try:
+            period_dt = datetime.strptime(p.period, "%Y%m%d")
+        except ValueError:
+            continue
+        if period_dt <= as_of_dt:
+            truncated_annual.append(p)
+    snap.financials.annual = truncated_annual
+
+    if not truncated_annual:
+        raise ValueError(f"as_of {as_of} 之前无财务数据")
+
+    # 用 as_of 时点价格重算市值
+    if price_at_as_of and snap.profile.shares:
+        snap.profile.total_market_cap = price_at_as_of * snap.profile.shares
+        snap.profile.current_price = price_at_as_of
+
+    # 重算内在价值（用截断后的 financials）
+    snap.intrinsic = compute_intrinsic_value(
+        snap.profile, snap.financials, snap.valuation, snap.dividends)
+
+    result = score_fn(snap)
+    return result.rating, result.total, result.action

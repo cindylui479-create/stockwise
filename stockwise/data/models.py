@@ -45,6 +45,10 @@ class FinancialPeriod:
     rd_exp: Optional[float] = None              # 研发支出总额（Tushare）
     rd_ratio: Optional[float] = None            # 研发投入占营收 %（Tushare）
     capex: Optional[float] = None               # 资本支出（Tushare）
+    # v0.11 P #52：利润质量深度分解（资产负债表科目）
+    accounts_receivable: Optional[float] = None     # 应收账款（坏账风险）
+    contract_liabilities: Optional[float] = None    # 合同负债（客户预付，茅台经销商打款指标）
+    prepayments: Optional[float] = None             # 预收账款（旧准则，2019 前 = 现 合同负债）
 
 
 @dataclass
@@ -227,4 +231,5 @@ class StockSnapshot:
     validation: ValidationReport = field(default_factory=ValidationReport)
     governance: GovernanceReport = field(default_factory=GovernanceReport)
     holders: HolderInfo = field(default_factory=HolderInfo)
-    industry_cycle: Optional["IndustryCycle"] = None  # v0.9
+    industry_cycle: Optional["IndustryCycle"] = None       # v0.9
+    industry_roe_rank: Optional["IndustryRoeRank"] = None  # v0.11 #51

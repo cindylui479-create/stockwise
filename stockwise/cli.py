@@ -635,8 +635,11 @@ def compare(codes: tuple, hk: bool):
               help="自定义标的代码列表，逗号分隔（如 600519,600036,000858）")
 @click.option("--min-score", type=int, default=None,
               help="仅从 screen 中取 quick_score ≥ N 的标的")
+@click.option("--rerun-scoring", is_flag=True,
+              help="v0.11 真历史回测：在 as_of 时点重跑评级，验证工具预测能力（慢，每只 +30s）")
 def backtest(as_of: str, horizon: Optional[str], from_screen: bool,
-             from_watchlist: bool, codes: Optional[str], min_score: Optional[int]):
+             from_watchlist: bool, codes: Optional[str], min_score: Optional[int],
+             rerun_scoring: bool):
     """回测：从指定日期持有筛选标的至今的收益（含与沪深 300 对比）。"""
     # 准备标的池
     pool: list[tuple[str, str]] = []
@@ -664,8 +667,10 @@ def backtest(as_of: str, horizon: Optional[str], from_screen: bool,
         click.secho("标的池为空", fg="red")
         sys.exit(2)
 
-    click.echo(f"[回测] 起点 {as_of} → 终点 {horizon or '今天'}，{len(pool)} 只标的")
-    result = run_backtest(as_of, pool, horizon, quick_scores=quick_scores)
+    click.echo(f"[回测] 起点 {as_of} → 终点 {horizon or '今天'}，{len(pool)} 只标的"
+               + (" [真历史回测]" if rerun_scoring else ""))
+    result = run_backtest(as_of, pool, horizon, quick_scores=quick_scores,
+                          rerun_scoring=rerun_scoring)
     if result.error:
         click.secho(f"失败：{result.error}", fg="red")
         return
@@ -675,15 +680,27 @@ def backtest(as_of: str, horizon: Optional[str], from_screen: bool,
 
 def _print_backtest(result) -> None:
     click.echo()
-    click.echo(f"{'代码':<8} {'名称':<14} {'Score':>6} {'起点价':>9} {'终点价':>9} {'收益率':>8}")
-    click.echo("-" * 70)
+    has_hist = any(r.historical_rating for r in result.rows)
+    if has_hist:
+        click.echo(f"{'代码':<8} {'名称':<12} {'as_of 评级':<14} {'as_of 分':>6} "
+                   f"{'起点价':>9} {'终点价':>9} {'收益率':>8}")
+        click.echo("-" * 95)
+    else:
+        click.echo(f"{'代码':<8} {'名称':<14} {'Score':>6} {'起点价':>9} {'终点价':>9} {'收益率':>8}")
+        click.echo("-" * 70)
     rows_sorted = sorted(result.rows, key=lambda r: r.return_pct or -999, reverse=True)
     for r in rows_sorted:
-        score = f"{r.quick_score}/30" if r.quick_score else "—"
         ps = f"{r.price_start:.2f}" if r.price_start else "—"
         pe = f"{r.price_end:.2f}" if r.price_end else "—"
         ret = f"{r.return_pct:+.1f}%" if r.return_pct is not None else "—"
-        click.echo(f"{r.code:<8} {r.name[:12]:<14} {score:>6} {ps:>9} {pe:>9} {ret:>8}")
+        if has_hist:
+            hr = (r.historical_rating or "—")[:12]
+            hs = f"{r.historical_score}/100" if r.historical_score else "—"
+            click.echo(f"{r.code:<8} {r.name[:10]:<12} {hr:<14} {hs:>6} "
+                       f"{ps:>9} {pe:>9} {ret:>8}")
+        else:
+            score = f"{r.quick_score}/30" if r.quick_score else "—"
+            click.echo(f"{r.code:<8} {r.name[:12]:<14} {score:>6} {ps:>9} {pe:>9} {ret:>8}")
     click.echo("-" * 70)
     if result.portfolio_return is not None:
         click.secho(f"等权组合收益率：{result.portfolio_return:+.2f}%", fg="green", bold=True)

@@ -75,6 +75,16 @@ def fetch(stock_id: StockId, validate: bool = True, governance: bool = True,
         snap.industry_cycle = fetch_industry_cycle(snap.profile.industry)
     except Exception:
         pass
+    # v0.11 #51：行业 ROE 横截面分位（首次行业拉取慢，缓存 72h 后秒回）
+    try:
+        if stock_id.market == "A":
+            from stockwise.data.industry_roe import fetch_industry_roe_rank
+            roes = [p.roe for p in snap.financials.annual[:5] if p.roe is not None]
+            company_roe_5y = sum(roes) / len(roes) if roes else None
+            snap.industry_roe_rank = fetch_industry_roe_rank(
+                stock_id.code, snap.profile.industry, company_roe_5y)
+    except Exception:
+        pass
     return snap
 
 
@@ -221,6 +231,10 @@ _A_INDICATOR_MAP = {
     "经营现金流量净额": "operating_cashflow",
     "商誉": "goodwill",
     "每股企业自由现金流量": "fcf_per_share",
+    # v0.11 #52：利润质量深度分解
+    "应收账款": "accounts_receivable",
+    "合同负债": "contract_liabilities",
+    "预收款项": "prepayments",
 }
 
 
