@@ -58,6 +58,12 @@ def fetch_events(code: str) -> GovernanceReport:
     """港股治理事件：东财港股新闻 → 关键词分级。
 
     code 是 4 位港股代码（如 '00700'）。
+
+    数据源选择说明（v0.13 #58）：
+      HKEx 披露易（https://www1.hkexnews.hk）是港交所官方公告源，但其搜索 API 要求
+      内部 stockId（4 位股票代码无效），公开搜索表单 + cookie/session 解析成本高。
+      工具暂用东财港股新闻当 proxy（覆盖回购/监管/业绩/重组等大事件），并在报告里
+      提供 HKEx 公司页直连，便于用户对照官方原文。
     """
     from stockwise.data.cache import cached_call, TTL_GOVERNANCE
     try:
@@ -98,6 +104,13 @@ def fetch_events(code: str) -> GovernanceReport:
             url=str(row.get("新闻链接", "")) or None,
         ))
     return GovernanceReport(events=events)
+
+
+def hkex_official_url(code: str) -> str:
+    """返回 HKEx 披露易该公司公告页 URL（用户手动核对官方原文）。"""
+    code_5 = code.zfill(5)
+    # HKEx 披露易公司公告页
+    return f"https://www1.hkexnews.hk/search/titlesearchservlet.do?lang=ZH&category=0&market=SEHK&searchType=1&documentType=-1&stockCode={code_5}"
 
 
 def _classify(title: str) -> Optional[str]:

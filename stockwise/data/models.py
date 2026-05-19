@@ -233,3 +233,4 @@ class StockSnapshot:
     holders: HolderInfo = field(default_factory=HolderInfo)
     industry_cycle: Optional["IndustryCycle"] = None       # v0.9
     industry_roe_rank: Optional["IndustryRoeRank"] = None  # v0.11 #51
+    business_segments: Optional["BusinessSegments"] = None # v0.13 #59

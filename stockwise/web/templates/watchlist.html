@@ -1,0 +1,45 @@
+{% extends "_base.html" %}
+{% block title %}watchlist · stockwise{% endblock %}
+{% block content %}
+<h1>📋 watchlist <span class="badge">{{ items | length }} 只</span></h1>
+
+{% if not items %}
+<p>watchlist 为空。命令行运行 <code>stockwise watch add CODE</code> 添加。</p>
+{% else %}
+<table>
+  <thead>
+    <tr>
+      <th>代码</th>
+      <th>市场</th>
+      <th>名称</th>
+      <th>评级</th>
+      <th class="num">得分</th>
+      <th>安全边际</th>
+      <th>买入价</th>
+      <th class="num">股数</th>
+      <th>行动建议</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for i in items %}
+    <tr>
+      <td><a href="/stock/{{ i.code }}">{{ i.code }}</a></td>
+      <td>{{ i.market }}</td>
+      <td>{{ i.name or '—' }}</td>
+      <td>{{ i.last_rating or '—' }}</td>
+      <td class="num">{{ i.last_score or '—' }}</td>
+      <td>{{ i.last_margin or '—' }}</td>
+      <td>{% if i.buy_price %}¥{{ "%.2f" | format(i.buy_price) }}{% else %}—{% endif %}</td>
+      <td class="num">{{ i.shares or '—' }}</td>
+      <td>{{ i.last_action or '—' }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+{% if holdings %}
+<p><strong>{{ holdings | length }} 只持仓 · 总成本 ¥{{ "{:,.0f}".format(total_cost) }}</strong>
+   <a href="/portfolio">详细组合视角 →</a></p>
+{% endif %}
+{% endif %}
+{% endblock %}

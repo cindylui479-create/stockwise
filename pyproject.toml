@@ -1,7 +1,7 @@
 [project]
 name = "stockwise"
-version = "0.12.0"
-description = "巴菲特/林奇范式 A 股 + 港股价值投资分析工具：watch run 并行化 + portfolio summary + CI 自动化"
+version = "0.13.0"
+description = "巴菲特/林奇范式 A 股 + 港股价值投资分析工具：Web UI + HKEx 链接 + 主营构成 + mkdocs 文档"
 license = { text = "MIT" }
 requires-python = ">=3.10"
 dependencies = [
@@ -18,6 +18,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
+web = ["fastapi>=0.110", "uvicorn>=0.27", "markdown>=3.5"]
 
 [project.scripts]
 stockwise = "stockwise.cli:main"
@@ -30,4 +31,4 @@ build-backend = "setuptools.build_meta"
 include = ["stockwise*"]
 
 [tool.setuptools.package-data]
-stockwise = ["report/*.j2"]
+stockwise = ["report/*.j2", "web/templates/*.html"]

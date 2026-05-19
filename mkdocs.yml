@@ -1,0 +1,59 @@
+site_name: stockwise
+site_description: 巴菲特/林奇范式 A 股 + 港股价值投资分析工具
+site_url: https://cindylui479-create.github.io/stockwise/
+repo_url: https://github.com/cindylui479-create/stockwise
+repo_name: cindylui479-create/stockwise
+
+theme:
+  name: material
+  language: zh
+  features:
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - content.code.copy
+    - search.suggest
+    - search.highlight
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: 切换深色
+    - scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: 切换浅色
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+  - pymdownx.tabbed:
+      alternate_style: true
+  - tables
+  - toc:
+      permalink: "#"
+
+nav:
+  - 首页: index.md
+  - 快速开始: quickstart.md
+  - 概念与口径:
+    - 6 类 Profile: profiles.md
+    - 卖出信号框架: sell-signals.md
+    - 行业周期位置: industry-cycle.md
+  - 命令参考:
+    - analyze 单股分析: cmd-analyze.md
+    - watch 监控: cmd-watch.md
+    - screen 筛选: cmd-screen.md
+    - compare 同业对标: cmd-compare.md
+    - portfolio 持仓视角: cmd-portfolio.md
+    - backtest 历史回测: cmd-backtest.md
+  - 进阶: advanced.md
+  - 改动记录: changelog.md

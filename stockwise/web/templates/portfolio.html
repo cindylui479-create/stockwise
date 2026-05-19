@@ -1,0 +1,50 @@
+{% extends "_base.html" %}
+{% block title %}portfolio · stockwise{% endblock %}
+{% block content %}
+<h1>💼 portfolio</h1>
+
+<p><strong>{{ holdings | length }} 只持仓 · 总成本 ¥{{ "{:,.0f}".format(total_cost) }}</strong></p>
+
+<table>
+  <thead>
+    <tr>
+      <th>代码</th>
+      <th>名称</th>
+      <th class="num">股数</th>
+      <th class="num">买入价</th>
+      <th class="num">成本</th>
+      <th>评级</th>
+      <th>行动建议</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for h in holdings %}
+    <tr>
+      <td><a href="/stock/{{ h.code }}">{{ h.code }}</a></td>
+      <td>{{ h.name or '—' }}</td>
+      <td class="num">{{ h.shares }}</td>
+      <td class="num">¥{{ "%.2f" | format(h.buy_price) }}</td>
+      <td class="num">¥{{ "{:,.0f}".format(h.buy_price * h.shares) }}</td>
+      <td>{{ h.last_rating or '—' }}</td>
+      <td>{{ h.last_action or '—' }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<h2>评级分布</h2>
+<table>
+  <thead>
+    <tr><th>评级</th><th class="num">只数</th></tr>
+  </thead>
+  <tbody>
+    {% for r, n in industry_count.items() %}
+    <tr><td>{{ r }}</td><td class="num">{{ n }}</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<p style="color:#666; font-size: 0.9em; margin-top: 24px;">
+  更完整的浮盈/行业分布/卖出信号热力请用命令行：<code>stockwise portfolio summary</code>
+</p>
+{% endblock %}

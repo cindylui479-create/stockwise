@@ -409,6 +409,41 @@ xychart-beta
 
 ---
 
+## 附 ⓪：主营业务构成（v0.13）
+
+{% if snap_segments and not snap_segments.skipped and (snap_segments.by_product or snap_segments.by_region) -%}
+**最新报告期：{{ snap_segments.latest_period }}**
+
+{% if snap_segments.by_product -%}
+### 按产品分类
+| 产品 | 收入占比 | 毛利率 |
+|---|---:|---:|
+{% for s in snap_segments.by_product[:8] -%}
+| {{ s.name }} | {{ "%.1f%%" | format((s.revenue_pct or 0) * 100) }} | {{ "%.1f%%" | format((s.gross_margin or 0) * 100) }} |
+{% endfor %}
+
+{% set top_product = snap_segments.by_product[0] -%}
+{% if top_product.revenue_pct and top_product.revenue_pct > 0.8 -%}
+⚠ **单一产品依赖**：{{ top_product.name }} 占营收 {{ "%.0f%%" | format(top_product.revenue_pct * 100) }}，单点风险偏高。
+{%- endif %}
+{%- endif %}
+
+{% if snap_segments.by_region -%}
+### 按地区分类
+| 地区 | 收入占比 | 毛利率 |
+|---|---:|---:|
+{% for s in snap_segments.by_region[:6] -%}
+| {{ s.name }} | {{ "%.1f%%" | format((s.revenue_pct or 0) * 100) }} | {{ "%.1f%%" | format((s.gross_margin or 0) * 100) }} |
+{% endfor %}
+{%- endif %}
+
+> 数据源：东财主营构成（akshare.stock_zygc_em）。识别单一业务依赖 / 地域集中度。
+{% else -%}
+*主营构成数据不可用。*
+{%- endif %}
+
+---
+
 ## 附 A：股东结构 & 持仓变动
 
 {% if holders.skipped or holders.error -%}
@@ -463,9 +498,18 @@ xychart-beta
 {% endfor %}
 {% endif %}
 
-> 数据来源：巨潮资讯网（cninfo.com.cn）。已过滤年报/季报等例行公告。
+> 数据来源：A 股 = 巨潮资讯网（cninfo.com.cn）；港股 = 东财港股新闻（akshare.stock_news_em）。
+{% if profile.market == 'HK' -%}
+> ⚠ 港股治理事件依赖东财港股新闻（关键词分级），权威性弱于 A 股巨潮。
+> 重要决策请核对 **[HKEx 披露易官方公告页](https://www1.hkexnews.hk/search/titlesearchservlet.do?lang=ZH&category=0&market=SEHK&searchType=1&documentType=-1&stockCode={{ profile.code.zfill(5) }})**。
+{%- endif %}
+
+已过滤年报/季报等例行公告 + 投资者交流 / 分析师评级 等非治理性新闻。
 {% else -%}
-✅ 近 180 天**无重大治理事件**（巨潮披露）。
+✅ 近 180 天**无重大治理事件**（{{ '巨潮披露' if profile.market == 'A' else '东财港股新闻' }}）。
+{% if profile.market == 'HK' -%}
+> 重要决策可核对 **[HKEx 披露易官方公告页](https://www1.hkexnews.hk/search/titlesearchservlet.do?lang=ZH&category=0&market=SEHK&searchType=1&documentType=-1&stockCode={{ profile.code.zfill(5) }})**。
+{%- endif %}
 {%- endif %}
 
 ---

@@ -85,6 +85,12 @@ def fetch(stock_id: StockId, validate: bool = True, governance: bool = True,
                 stock_id.code, snap.profile.industry, company_roe_5y)
     except Exception:
         pass
+    # v0.13 #59：主营构成 / 关联企业
+    try:
+        from stockwise.data.business_segments import fetch_segments
+        snap.business_segments = fetch_segments(stock_id.code, stock_id.market)
+    except Exception:
+        pass
     return snap
 
 
