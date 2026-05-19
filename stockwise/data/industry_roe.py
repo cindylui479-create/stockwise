@@ -31,6 +31,51 @@ class IndustryRoeRank:
 _ENABLED_VIEWS = {"default", "bank", "insurance", "cyclical", "semi_growth", "growth"}
 
 
+# INDUSTRYCSRC1（akshare 细分名）→ baostock 证监会大类关键词（包含匹配）
+_BAOSTOCK_INDUSTRY_MAP = {
+    # 食品 / 酒
+    "白酒": "酒、饮料",
+    "饮料": "酒、饮料",
+    "食品": "食品制造",
+    "农副食品": "农副食品加工",
+    # 资源 / 周期
+    "煤炭": "煤炭开采",
+    "钢铁": "黑色金属",
+    "有色金属": "有色金属",
+    "石油": "石油",
+    "化工": "化学原料",
+    "化学制品": "化学原料",
+    # 制造
+    "汽车": "汽车制造",
+    "家电": "电气机械",
+    "家用电器": "电气机械",
+    # 医药
+    "医药": "医药制造",
+    # 金融
+    "银行": "货币金融",
+    "货币金融": "货币金融",
+    "保险": "保险",
+    "证券": "资本市场",
+    # 房地产
+    "房地产": "房地产",
+    # 公用
+    "电力": "电力",
+    "燃气": "燃气",
+}
+
+
+def _map_to_baostock_industry(industry: str) -> Optional[str]:
+    """INDUSTRYCSRC1 细分名 → baostock 证监会大类的关键词（用于 contains 匹配）。"""
+    if not industry:
+        return None
+    if industry in _BAOSTOCK_INDUSTRY_MAP:
+        return _BAOSTOCK_INDUSTRY_MAP[industry]
+    for key, mapped in _BAOSTOCK_INDUSTRY_MAP.items():
+        if key in industry:
+            return mapped
+    return None
+
+
 def fetch_industry_roe_rank(code: str, industry: Optional[str],
                               company_roe: Optional[float]) -> IndustryRoeRank:
     """对 code 计算其在行业内的 ROE 分位。
@@ -78,21 +123,27 @@ def fetch_industry_roe_rank(code: str, industry: Optional[str],
 def _peers_roe(industry: str) -> list[tuple[str, Optional[float]]]:
     """从 baostock 拉同行业成员的近 5 年 ROE 均值。
 
-    简化：先拉行业表（按 INDUSTRYCSRC1 字段匹配），取前 30 个代码（baostock 行业代码无市值），
-    然后对每只查 profit_data 取近 5 年 ROE 均值。
+    baostock industry 字段是证监会大类格式（如 'C15酒、饮料和精制茶制造业'），
+    与 INDUSTRYCSRC1 的细分名（如"白酒"）不直接匹配。
+    映射策略：用关键词匹配 INDUSTRYCSRC1 → baostock 大类，覆盖主要行业。
     """
     from stockwise.industry import _ensure_baostock_login
     import baostock as bs
     _ensure_baostock_login()
 
-    # 同行业成员
     rs = bs.query_stock_industry()
     df = rs.get_data()
     if df is None or df.empty:
         return []
-    # baostock industry 字段是简化名（如"采掘业"），需要关键词包含匹配
-    members = df[df["industry"].str.contains(industry[:2], na=False)] \
-              if len(industry) >= 2 else df[df["industry"] == industry]
+
+    # INDUSTRYCSRC1 → baostock 大类关键词映射（取 baostock industry 字符串需含的关键字）
+    bs_keyword = _map_to_baostock_industry(industry)
+    if bs_keyword:
+        members = df[df["industry"].str.contains(bs_keyword, na=False, regex=False)]
+    else:
+        # fallback：用 INDUSTRYCSRC1 头 2 字
+        members = df[df["industry"].str.contains(industry[:2], na=False, regex=False)] \
+                  if len(industry) >= 2 else df[df["industry"] == industry]
     members = members.head(30)
 
     peers: list[tuple[str, Optional[float]]] = []

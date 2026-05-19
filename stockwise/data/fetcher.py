@@ -244,6 +244,46 @@ _A_INDICATOR_MAP = {
 }
 
 
+def _a_balance_sheet_enrich(code: str, fin: Financials) -> None:
+    """v0.11 #52 fix：从东财资产负债表接口拉应收账款 / 合同负债填充到 fin。
+
+    stock_financial_abstract 返回的"常用指标"不含资产负债表科目，需要
+    stock_balance_sheet_by_report_em（英文列名：ACCOUNTS_RECE / CONTRACT_LIAB）。
+    """
+    from stockwise.data.cache import cached_call, TTL_FINANCIALS
+    if not fin.annual:
+        return
+    try:
+        prefix = "SH" if code.startswith("6") else "SZ"
+        symbol = f"{prefix}{code}"
+        df = cached_call(
+            "em:balance_sheet", symbol, TTL_FINANCIALS,
+            lambda: ak.stock_balance_sheet_by_report_em(symbol=symbol),
+        )
+    except Exception:
+        return
+    if df is None or df.empty:
+        return
+
+    # 建立 REPORT_DATE (YYYY-MM-DD) → row 索引（只取 12-31 年报）
+    import pandas as pd
+    df = df.copy()
+    df["REPORT_DATE_STR"] = df["REPORT_DATE"].astype(str).str[:10]
+    annual_rows = df[df["REPORT_DATE_STR"].str.endswith("-12-31")]
+    by_date = {row["REPORT_DATE_STR"]: row for _, row in annual_rows.iterrows()}
+
+    for p in fin.annual:
+        # period 是 "20251231"，转换为 "2025-12-31"
+        if len(p.period) >= 8:
+            date_str = f"{p.period[:4]}-{p.period[4:6]}-{p.period[6:8]}"
+            row = by_date.get(date_str)
+            if row is None:
+                continue
+            p.accounts_receivable = _to_float(row.get("ACCOUNTS_RECE"))
+            p.contract_liabilities = _to_float(row.get("CONTRACT_LIAB"))
+            p.prepayments = _to_float(row.get("ADVANCE_RECEIVABLES"))
+
+
 def _a_financials(code: str, years: int = 10) -> Financials:
     from stockwise.data.cache import cached_call, TTL_FINANCIALS
     df = cached_call(
@@ -286,7 +326,10 @@ def _a_financials(code: str, years: int = 10) -> Financials:
             period.revenue_yoy = _yoy(by_indicator.get("revenue"), col, prev_col)
             period.profit_yoy = _yoy(by_indicator.get("net_profit"), col, prev_col)
         annual.append(period)
-    return Financials(annual=annual)
+    fin = Financials(annual=annual)
+    # v0.11 #52：补充资产负债表科目（应收账款 / 合同负债）
+    _a_balance_sheet_enrich(code, fin)
+    return fin
 
 
 def _a_valuation(code: str) -> Valuation:
