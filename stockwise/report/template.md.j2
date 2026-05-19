@@ -62,6 +62,37 @@
 
 ---
 
+## ⓪ 行业周期位置
+
+{% if snap_industry_cycle is defined and snap_industry_cycle and not snap_industry_cycle.skipped and snap_industry_cycle.percentile is not none -%}
+**当前位置：{{ snap_industry_cycle.label }}** （5 年价格分位 **{{ "%.0f" | format(snap_industry_cycle.percentile) }}%**）
+
+| 指标 | 值 |
+|---|---:|
+| 行业（同花顺） | {{ snap_industry_cycle.ths_name }} |
+| 当前指数 | {{ "%.2f" | format(snap_industry_cycle.current) }} |
+| 5 年最低 | {{ "%.2f" | format(snap_industry_cycle.low_5y) }} |
+| 5 年最高 | {{ "%.2f" | format(snap_industry_cycle.high_5y) }} |
+
+{% if snap_industry_cycle.label == "高位" -%}
+> ⚠ **周期高位提醒**：行业指数处 5 年 80% 分位以上，"核心资产→价值陷阱"风险升高。即便公司基本面稳健，估值回归压力较大。
+{% elif snap_industry_cycle.label == "底部" -%}
+> 📍 **周期底部提醒**：行业指数处 5 年 20% 分位以下，可能是周期反转机会，但需核对公司是否撑得过下行周期（CFO + 负债率）。
+{% elif snap_industry_cycle.label == "中位偏高" -%}
+> 行业指数处于 50-80% 区间，估值有一定压力。
+{% else -%}
+> 行业指数处于 20-50% 区间，估值相对中性。
+{% endif -%}
+
+> 数据源：同花顺行业指数 5 年收盘价分位（PE 数据接口不可用，用价格分位作 proxy）。
+{% elif snap_industry_cycle is defined and snap_industry_cycle and snap_industry_cycle.skipped -%}
+*行业 "{{ snap_industry_cycle.industry }}" 暂未启用周期位置（仅周期/消费/医药/金融行业映射，详见 industry_cycle._INDUSTRY_MAP）。*
+{% else -%}
+*未获取行业周期位置。*
+{%- endif %}
+
+---
+
 ## 一、公司速览与主业
 
 {% if llm and llm.main_business -%}

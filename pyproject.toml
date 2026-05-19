@@ -1,7 +1,7 @@
 [project]
 name = "stockwise"
-version = "0.8.0"
-description = "巴菲特/林奇范式 A 股 + 港股价值投资分析工具：6 类行业 profile（含半成长）+ 卖出框架 + 派息按财务年度 + Munger 反向 10 提问"
+version = "0.9.0"
+description = "巴菲特/林奇范式 A 股 + 港股价值投资分析工具：6 profile + 卖出框架 + 行业周期位置 + 港股治理事件 + CFO 二源校验"
 license = { text = "MIT" }
 requires-python = ">=3.10"
 dependencies = [

@@ -69,6 +69,12 @@ def fetch(stock_id: StockId, validate: bool = True, governance: bool = True,
     if holders:
         from stockwise.data.holders import fetch_holders
         snap.holders = fetch_holders(stock_id.code, stock_id.market, yf_info)
+    # v0.9：行业周期位置（仅周期/消费/医药/金融启用映射，其他静默跳过）
+    try:
+        from stockwise.data.industry_cycle import fetch_industry_cycle
+        snap.industry_cycle = fetch_industry_cycle(snap.profile.industry)
+    except Exception:
+        pass
     return snap
 
 

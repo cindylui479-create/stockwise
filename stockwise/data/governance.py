@@ -53,9 +53,11 @@ _TITLE_MEDIUM_KEYS = [
 
 
 def fetch_events(code: str, market: str) -> GovernanceReport:
-    """A 股拉巨潮公告并分类。港股直接 skip。"""
+    """A 股走巨潮公告；港股 (v0.9) 走东财港股新闻分级。"""
     if market != "A":
-        return GovernanceReport(skipped=True, error="治理事件抓取暂不支持港股")
+        # v0.9：港股治理事件路由到 hk_governance 模块（东财港股新闻为源）
+        from stockwise.data.hk_governance import fetch_events as hk_fetch
+        return hk_fetch(code)
 
     from stockwise.data.cache import cached_call, TTL_GOVERNANCE
     end = datetime.today()

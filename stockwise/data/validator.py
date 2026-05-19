@@ -72,6 +72,20 @@ def _diff_against_baostock(code: str, fin: Financials) -> tuple[list[ValidationD
             checked += _maybe_add(diffs, "净利率", period, fp.net_margin, bs_npmargin)
             checked += _maybe_add(diffs, "毛利率", period, fp.gross_margin, bs_gpmargin)
             checked += _maybe_add(diffs, "营收", period, fp.revenue, bs_revenue)
+
+            # v0.9 P2-2：经营现金流 二源校验（baostock cashflow → CFOToOR × 营收 = CFO）
+            bs_cfo = None
+            try:
+                rs_cf = bs.query_cash_flow_data(code=bs_code, year=year, quarter=4)
+                df_cf = rs_cf.get_data()
+                if df_cf is not None and not df_cf.empty:
+                    cfo_to_or = _to_float(df_cf.iloc[0].get("CFOToOR"))  # 比例
+                    if cfo_to_or is not None and bs_revenue is not None:
+                        bs_cfo = cfo_to_or * bs_revenue
+            except Exception:
+                pass
+            checked += _maybe_add(diffs, "经营现金流", period,
+                                  fp.operating_cashflow, bs_cfo)
         return diffs, checked
     finally:
         bs.logout()

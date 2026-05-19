@@ -227,3 +227,4 @@ class StockSnapshot:
     validation: ValidationReport = field(default_factory=ValidationReport)
     governance: GovernanceReport = field(default_factory=GovernanceReport)
     holders: HolderInfo = field(default_factory=HolderInfo)
+    industry_cycle: Optional["IndustryCycle"] = None  # v0.9
