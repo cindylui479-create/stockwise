@@ -179,19 +179,39 @@ def watch():
 @watch.command("add")
 @click.argument("code")
 @click.option("--hk", is_flag=True, help="按港股识别")
-def watch_add(code: str, hk: bool):
-    """加入 watchlist。"""
+@click.option("--price", type=float, default=None, help="买入价（v0.10 持仓跟踪）")
+@click.option("--shares", type=int, default=None, help="持有股数")
+def watch_add(code: str, hk: bool, price: float | None, shares: int | None):
+    """加入 watchlist；可选指定买入价 + 股数（跟踪浮盈浮亏）。"""
     try:
         sid = parse_code(code, hint_hk=hk)
     except ValueError as e:
         click.secho(f"错误：{e}", fg="red", err=True)
         sys.exit(2)
     wl = Watchlist.load()
-    if wl.add(sid.code, sid.market):
+    if wl.add(sid.code, sid.market, buy_price=price, shares=shares):
         wl.save()
-        click.secho(f"✓ 已加入 watchlist: {sid.code} ({sid.market})", fg="green")
+        hold = f" 买入价 ¥{price:.2f} × {shares} 股" if price and shares else ""
+        click.secho(f"✓ 已加入 watchlist: {sid.code} ({sid.market}){hold}", fg="green")
     else:
         click.echo(f"  已存在: {sid.code} ({sid.market})")
+
+
+@watch.command("set")
+@click.argument("code")
+@click.option("--price", type=float, default=None, help="买入价")
+@click.option("--shares", type=int, default=None, help="持有股数")
+def watch_set(code: str, price: float | None, shares: int | None):
+    """更新已有 watchlist 项的买入价 / 股数。"""
+    if price is None and shares is None:
+        click.secho("至少指定 --price 或 --shares", fg="yellow")
+        return
+    wl = Watchlist.load()
+    if wl.update_holding(code, buy_price=price, shares=shares):
+        wl.save()
+        click.secho(f"✓ 已更新 {code} 持仓信息", fg="green")
+    else:
+        click.echo(f"  未找到 {code}（用 watch add 先加入）")
 
 
 @watch.command("remove")
@@ -207,21 +227,40 @@ def watch_remove(code: str):
 
 
 @watch.command("list")
-def watch_list():
-    """显示 watchlist 中所有股票最近一次评级。"""
+@click.option("--holdings", is_flag=True, help="只显示有买入价的持仓 + 浮盈浮亏")
+def watch_list(holdings: bool):
+    """显示 watchlist 中所有股票最近一次评级 + 浮盈浮亏（若已记录买入价）。"""
     wl = Watchlist.load()
     if not wl.items:
         click.echo("watchlist 为空。用 `stockwise watch add <code>` 加入。")
         return
-    click.echo(f"{'代码':<8} {'市场':<4} {'名称':<14} {'评级':<14} {'得分':>5} {'安全边际':<6} {'行动建议':<24}")
-    click.echo("-" * 100)
-    for i in wl.items:
+    rows = [i for i in wl.items if (not holdings or i.buy_price)]
+    if not rows:
+        click.echo("无持仓记录。用 `watch add CODE --price X --shares Y` 或 `watch set` 添加。")
+        return
+
+    click.echo(f"{'代码':<8} {'市场':<4} {'名称':<14} {'评级':<14} {'得分':>5} {'安全边际':<6} "
+               f"{'买入价':>8} {'股数':>6} {'浮盈%':>8} {'行动建议':<24}")
+    click.echo("-" * 130)
+    total_cost = total_market = 0.0
+    for i in rows:
         name = (i.name or "—")[:12]
         rating = (i.last_rating or "—")[:12]
         score_str = f"{i.last_score:>5}" if i.last_score else "    —"
         margin = (i.last_margin or "—")[:4]
         action = (i.last_action or "—")[:22]
-        click.echo(f"{i.code:<8} {i.market:<4} {name:<14} {rating:<14} {score_str} {margin:<6} {action:<24}")
+        buy = f"¥{i.buy_price:.2f}" if i.buy_price else "—"
+        shares = f"{i.shares}" if i.shares else "—"
+        # 浮盈：用 v0.10 不实时拉价；用 last_score 时点的 current_price 不存，所以仅在 watch run 之后通过外部填
+        pnl_str = "—"
+        if i.buy_price and i.shares:
+            total_cost += i.buy_price * i.shares
+            # 简化：用 last_action 中的价格信息不可得 → 持仓浮盈需 watch run 时另算
+        click.echo(f"{i.code:<8} {i.market:<4} {name:<14} {rating:<14} {score_str} {margin:<6} "
+                   f"{buy:>8} {shares:>6} {pnl_str:>8} {action:<24}")
+    if holdings and total_cost:
+        click.secho(f"\n持仓成本：¥{total_cost:,.0f}  （浮盈需运行 `watch run` 后看 portfolio summary）",
+                    fg="cyan")
 
 
 @watch.command("run")
@@ -484,6 +523,99 @@ def _add_results_to_watchlist(rows) -> None:
             added += 1
     wl.save()
     click.secho(f"✓ 加入 watchlist {added} 只（重复的跳过）", fg="green")
+
+
+# ============================================================================
+# compare 子命令（v0.10）
+# ============================================================================
+
+@cli.command()
+@click.argument("codes", nargs=-1, required=True)
+@click.option("--hk", is_flag=True, help="按港股识别全部代码")
+def compare(codes: tuple, hk: bool):
+    """同行业多只股票横向对比表。
+
+    示例：
+      stockwise compare 600036 601166 601398    # 招行 vs 兴业 vs 工行
+      stockwise compare 00700 00939 --hk         # 腾讯 vs 建行港股
+    """
+    if len(codes) < 2:
+        click.secho("compare 至少需要 2 个代码", fg="red")
+        sys.exit(2)
+    rows = []
+    for code in codes:
+        try:
+            sid = parse_code(code, hint_hk=hk)
+        except ValueError as e:
+            click.secho(f"  {code}: {e}", fg="red")
+            continue
+        click.echo(f"拉取 {sid.code} …", nl=False)
+        try:
+            # 不跑 governance / holders，加速 compare（默认 ~5-10s/只）
+            snapshot = fetch(sid, validate=False, governance=False, holders=False)
+            result = score(snapshot)
+        except Exception as e:
+            click.secho(f"  失败：{e}", fg="yellow")
+            continue
+        # 5y ROE 均值
+        roes = [p.roe for p in snapshot.financials.annual[:5] if p.roe is not None]
+        roe5y = sum(roes) / len(roes) if roes else None
+        # 派息率
+        div_yield = None
+        if snapshot.dividends.ttm_per_10_shares and snapshot.profile.current_price:
+            per_share = snapshot.dividends.ttm_per_10_shares / 10
+            div_yield = per_share / snapshot.profile.current_price * 100
+        rows.append({
+            "code": sid.code,
+            "name": snapshot.profile.name or "—",
+            "industry": (snapshot.profile.industry or "—")[:14],
+            "view": result.industry_view,
+            "rating": result.rating,
+            "total": result.total,
+            "roe5y": roe5y,
+            "pe": snapshot.valuation.pe_ttm,
+            "pb": snapshot.valuation.pb,
+            "div_yield": div_yield,
+            "margin": result.margin_of_safety,
+            "discount": snapshot.intrinsic.discount,
+            "action": result.action,
+            "sell_signals": len(result.sell_signals),
+        })
+        click.echo(f" ✓ {result.rating} {result.total}/100")
+
+    if not rows:
+        click.secho("无可对比标的", fg="red")
+        return
+
+    # 输出对比表
+    click.echo()
+    click.echo(f"{'代码':<8} {'名称':<10} {'行业':<14} {'profile':<10} "
+               f"{'评级':<12} {'得分':>5} {'5y ROE':>7} "
+               f"{'PE':>6} {'PB':>5} {'股息率':>7} {'折价%':>7} {'卖出':>4} {'行动':<26}")
+    click.echo("-" * 150)
+    # 按得分降序
+    rows.sort(key=lambda r: r["total"], reverse=True)
+    for r in rows:
+        roe = f"{r['roe5y']:.1f}%" if r["roe5y"] is not None else "—"
+        pe = f"{r['pe']:.1f}" if r["pe"] else "—"
+        pb = f"{r['pb']:.2f}" if r["pb"] else "—"
+        dy = f"{r['div_yield']:.2f}%" if r["div_yield"] else "—"
+        dc = f"{r['discount']:+.1f}%" if r["discount"] is not None else "—"
+        ss = f"{r['sell_signals']}" if r["sell_signals"] else "—"
+        action = r["action"][:24]
+        click.echo(f"{r['code']:<8} {r['name'][:8]:<10} {r['industry']:<14} {r['view']:<10} "
+                   f"{r['rating'][:10]:<12} {r['total']:>5} {roe:>7} "
+                   f"{pe:>6} {pb:>5} {dy:>7} {dc:>7} {ss:>4} {action:<26}")
+
+    # 行业一致性提示
+    industries = set(r["industry"] for r in rows)
+    if len(industries) > 1:
+        click.secho(f"\n⚠ 注意：{len(industries)} 种行业混合对比（{', '.join(industries)}），"
+                    f"评估口径不同，请谨慎横向比较。", fg="yellow")
+    # 推荐
+    top = rows[0]
+    click.secho(f"\n🏆 同列最高分：{top['code']} {top['name']} ({top['total']}/100, {top['rating']})",
+                fg="green", bold=True)
 
 
 # ============================================================================

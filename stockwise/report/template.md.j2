@@ -127,6 +127,23 @@
 | {{ fp.period }} | {{ format_money(fp.revenue, profile.currency) }} | {{ format_money(fp.net_profit, profile.currency) }} | {{ format_pct(fp.roe) }} | {{ format_pct(fp.gross_margin) }} | {{ format_pct(fp.net_margin) }} |
 {% endfor %}
 
+{% set trend = financials.annual[:5] | selectattr('roe', 'ne', None) | list -%}
+{% if trend | length >= 3 -%}
+**5 年趋势图（ROE / 毛利率 / 净利率，%）**：
+
+```mermaid
+xychart-beta
+    title "ROE / 毛利率 / 净利率（%）"
+    x-axis [{% for fp in trend | reverse %}"{{ fp.period[:4] }}"{% if not loop.last %}, {% endif %}{% endfor %}]
+    y-axis "%" 0 --> 100
+    line [{% for fp in trend | reverse %}{{ "%.1f" | format(fp.roe or 0) }}{% if not loop.last %}, {% endif %}{% endfor %}]
+    line [{% for fp in trend | reverse %}{{ "%.1f" | format(fp.gross_margin or 0) }}{% if not loop.last %}, {% endif %}{% endfor %}]
+    line [{% for fp in trend | reverse %}{{ "%.1f" | format(fp.net_margin or 0) }}{% if not loop.last %}, {% endif %}{% endfor %}]
+```
+
+> 三条线分别是 ROE / 毛利率 / 净利率。趋势连续下降是"生意变质"早期信号（参见卖出信号章节）。
+{%- endif %}
+
 ---
 
 ## 三、盈利质量与资本配置（{{ score.dimensions['盈利质量'] + score.dimensions['资本配置'] }} / {{ score.dimension_caps['盈利质量'] + score.dimension_caps['资本配置'] }}）

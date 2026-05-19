@@ -30,6 +30,22 @@ class WatchItem:
     last_action: Optional[str] = None
     last_margin: Optional[str] = None
     last_run: Optional[str] = None
+    # v0.10：个人持仓信息
+    buy_price: Optional[float] = None    # 加权买入价
+    shares: Optional[int] = None         # 持有股数
+
+    def current_pnl(self, current_price: Optional[float]) -> Optional[dict]:
+        """计算浮盈浮亏。返回 dict 含 cost / market_value / pnl_amount / pnl_pct 或 None。"""
+        if self.buy_price is None or self.shares is None or current_price is None:
+            return None
+        cost = self.buy_price * self.shares
+        mkt = current_price * self.shares
+        return {
+            "cost": cost,
+            "market_value": mkt,
+            "pnl_amount": mkt - cost,
+            "pnl_pct": (current_price - self.buy_price) / self.buy_price * 100,
+        }
 
 
 @dataclass
@@ -51,14 +67,28 @@ class Watchlist:
         data = {"items": [asdict(i) for i in self.items]}
         _WATCH_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    def add(self, code: str, market: str, name: Optional[str] = None) -> bool:
+    def add(self, code: str, market: str, name: Optional[str] = None,
+            buy_price: Optional[float] = None, shares: Optional[int] = None) -> bool:
         if any(i.code == code and i.market == market for i in self.items):
             return False
         self.items.append(WatchItem(
             code=code, market=market, name=name,
             added_at=datetime.now().isoformat(timespec="seconds"),
+            buy_price=buy_price, shares=shares,
         ))
         return True
+
+    def update_holding(self, code: str, *, buy_price: Optional[float] = None,
+                       shares: Optional[int] = None) -> bool:
+        """更新已有持仓的买入价 / 股数（None 表示不修改）。"""
+        for i in self.items:
+            if i.code == code:
+                if buy_price is not None:
+                    i.buy_price = buy_price
+                if shares is not None:
+                    i.shares = shares
+                return True
+        return False
 
     def remove(self, code: str) -> bool:
         before = len(self.items)
