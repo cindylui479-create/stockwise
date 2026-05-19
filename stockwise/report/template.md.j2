@@ -239,7 +239,34 @@
 
 ---
 
-## 十一、综合判断
+## 十一、卖出信号 / 减仓提示
+
+> 巴菲特卖出三种情形：①生意变质 ②质量变质 ③估值离谱。本节独立于打分体系，触发任一即给出预警，便于持仓人主动复盘。
+
+{% if score.sell_signals -%}
+{% set high_signals = score.sell_signals | selectattr('severity', 'equalto', 'high') | list -%}
+{% set medium_signals = score.sell_signals | selectattr('severity', 'equalto', 'medium') | list -%}
+{% if high_signals -%}
+### 🔴 高严重度信号（{{ high_signals | length }} 条）
+{% for s in high_signals -%}
+- **[{{ {'business': '生意变质', 'quality': '质量变质', 'valuation': '估值离谱'}[s.category] }}] {{ s.label }}** —— {{ s.evidence }}
+{% endfor %}
+{% endif -%}
+{% if medium_signals -%}
+### 🟡 中等严重度信号（{{ medium_signals | length }} 条）
+{% for s in medium_signals -%}
+- **[{{ {'business': '生意变质', 'quality': '质量变质', 'valuation': '估值离谱'}[s.category] }}] {{ s.label }}** —— {{ s.evidence }}
+{% endfor %}
+{% endif -%}
+
+> 行动建议已根据上述信号进行降档：见上方"行动建议"字段。
+{% else -%}
+✅ 未触发任何卖出信号（生意 / 质量 / 估值 三维度均未达警示阈值）。
+{%- endif %}
+
+---
+
+## 十二、综合判断
 
 {% if llm and llm.verdict -%}
 {{ llm.verdict }}

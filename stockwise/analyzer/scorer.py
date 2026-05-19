@@ -17,6 +17,7 @@ import statistics
 from dataclasses import dataclass, field
 from typing import Optional
 
+from stockwise.analyzer.sell_signals import SellSignal, analyze as analyze_sell_signals, degrade_action
 from stockwise.data.fetcher import classify_industry_view
 from stockwise.data.models import (
     DividendInfo,
@@ -40,6 +41,7 @@ class ScoreResult:
     reasons: list[str] = field(default_factory=list)
     vetoes: list[str] = field(default_factory=list)
     checklist: list[tuple[str, bool, str]] = field(default_factory=list)
+    sell_signals: list[SellSignal] = field(default_factory=list)
 
 
 DIMENSION_CAPS = {
@@ -83,8 +85,10 @@ def score(snapshot: StockSnapshot,
     }
     total = sum(dims.values())
     rating = _rating(total, iv.discount, vetoes)
+    sell_signals = analyze_sell_signals(snapshot)
     action = _action(total, iv.discount, vetoes, snapshot.governance,
-                     llm_business_score=llm_business_score)
+                     llm_business_score=llm_business_score,
+                     sell_signals=sell_signals)
 
     flags = [*moat_flags, *quality_flags, *capital_flags, *growth_flags, *safety_flags]
     if biz_note:
@@ -106,6 +110,7 @@ def score(snapshot: StockSnapshot,
         reasons=reasons,
         vetoes=vetoes,
         checklist=checklist,
+        sell_signals=sell_signals,
     )
 
 
@@ -690,7 +695,8 @@ def _score_management(score_0_5: Optional[int]) -> tuple[int, str]:
 # ---------------------------------------------------------------------------
 
 def _action(total: int, discount: Optional[float], vetoes: list[str],
-            governance, llm_business_score: Optional[int] = None) -> str:
+            governance, llm_business_score: Optional[int] = None,
+            sell_signals: Optional[list] = None) -> str:
     """独立于质量评级的"具体行动建议"。
 
     决策矩阵：
@@ -729,6 +735,10 @@ def _action(total: int, discount: Optional[float], vetoes: list[str],
 
     if governance and hasattr(governance, "has_red_flags") and governance.has_red_flags:
         base = f"{base} ⚠ 留意治理红旗"
+
+    # 卖出信号叠加：估值严重离谱 → 强制"考虑减仓"；生意/质量恶化 → 追加 ⚠
+    if sell_signals:
+        base = degrade_action(base, sell_signals, total, discount)
     return base
 
 
