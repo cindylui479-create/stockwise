@@ -1,7 +1,7 @@
 [project]
 name = "stockwise"
-version = "0.11.0"
-description = "巴菲特/林奇范式 A 股 + 港股价值投资分析工具：真历史回测 + 行业 ROE 分位 + 利润质量深度分解 + 买卖价位区间"
+version = "0.12.0"
+description = "巴菲特/林奇范式 A 股 + 港股价值投资分析工具：watch run 并行化 + portfolio summary + CI 自动化"
 license = { text = "MIT" }
 requires-python = ">=3.10"
 dependencies = [

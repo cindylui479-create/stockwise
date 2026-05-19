@@ -263,66 +263,110 @@ def watch_list(holdings: bool):
                     fg="cyan")
 
 
+def _run_single_subprocess(args: tuple) -> dict:
+    """单股 subprocess 调用 + 解析评级。v0.12 并行化用。
+
+    args: (code, market, no_llm, brief)
+    返回 dict 含 code/status/rating/score/margin/action/stdout_tail
+    """
+    import re
+    import subprocess
+    code, market, no_llm, brief = args
+    cmd = ["python3", "-m", "stockwise", code]
+    if market == "HK":
+        cmd.append("--hk")
+    if no_llm:
+        cmd.append("--no-llm")
+    if brief:
+        cmd.append("--brief")
+    try:
+        proc = subprocess.run(cmd, timeout=480, check=False,
+                               capture_output=True, text=True)
+    except subprocess.TimeoutExpired:
+        return {"code": code, "status": "timeout"}
+    except Exception as e:
+        return {"code": code, "status": "error", "error": str(e)}
+    out_text = proc.stdout
+    rating_m = re.search(r"评级：(\S+)\s+得分\s+(\d+)/100\s+安全边际：(\S+)", out_text)
+    action_m = re.search(r"行动建议：(.+)", out_text)
+    if not rating_m:
+        return {"code": code, "status": "parse_fail",
+                "stdout_tail": out_text[-300:]}
+    return {
+        "code": code,
+        "status": "ok",
+        "rating": rating_m.group(1),
+        "score": int(rating_m.group(2)),
+        "margin": rating_m.group(3),
+        "action": action_m.group(1).strip() if action_m else "—",
+        "stdout_tail": out_text[-300:],
+    }
+
+
 @watch.command("run")
 @click.option("--no-llm", is_flag=True, help="跳过 LLM")
 @click.option("--brief", is_flag=True, help="只生成快读版报告")
 @click.option("--out", type=click.Path(file_okay=False, path_type=Path), default=None)
-def watch_run(no_llm: bool, brief: bool, out: Path | None):
+@click.option("--workers", type=int, default=4,
+              help="并行 worker 数（v0.12 默认 4，从 60min 缩到 ~15-20min）")
+@click.option("--serial", is_flag=True,
+              help="强制串行模式（调试用，等同于 --workers 1）")
+def watch_run(no_llm: bool, brief: bool, out: Path | None, workers: int, serial: bool):
     """跑 watchlist 中所有股票，更新评级；标记发生变化的标的。
 
-    用 subprocess 隔离每只单股 + 480s 超时（含 LLM 调用上限 120s × 1 次重试 + 数据采集 + 余量）。
+    v0.12 默认并行 4 个 worker（每个 worker 自己 subprocess 隔离），
+    49 只从 60min → ~15-20min。--serial 强制串行（用于调试）。
     """
-    import re
-    import subprocess
     wl = Watchlist.load()
     if not wl.items:
         click.echo("watchlist 为空。")
         return
+
+    if serial:
+        workers = 1
+    n = len(wl.items)
+    click.echo(f"[watch run] {n} 只标的，{'串行' if workers == 1 else f'并行 {workers} workers'}")
+
+    tasks = [(i.code, i.market, no_llm, brief) for i in wl.items]
+    results: list[dict] = []
+
+    if workers == 1:
+        for t in tasks:
+            click.echo(f"\n========== {t[0]} ==========")
+            r = _run_single_subprocess(t)
+            results.append(r)
+            _print_subprocess_result(r)
+    else:
+        from multiprocessing import Pool
+        with Pool(processes=workers) as pool:
+            for i, r in enumerate(pool.imap_unordered(_run_single_subprocess, tasks), 1):
+                click.echo(f"\n[{i}/{n}] ========== {r['code']} ==========")
+                results.append(r)
+                _print_subprocess_result(r)
+
+    # 回填 watchlist + 检测变化
     changes: list[str] = []
     timeouts = failures = 0
+    by_code = {r["code"]: r for r in results}
     for item in wl.items:
-        click.echo(f"\n========== {item.code} {item.name or ''} ==========")
-        cmd = ["python3", "-m", "stockwise", item.code]
-        if item.market == "HK":
-            cmd.append("--hk")
-        if no_llm:
-            cmd.append("--no-llm")
-        if brief:
-            cmd.append("--brief")
-        try:
-            proc = subprocess.run(cmd, timeout=480, check=False,
-                                   capture_output=True, text=True)
-            if proc.stdout:
-                click.echo(proc.stdout, nl=False)
-        except subprocess.TimeoutExpired:
-            click.secho(f"  ⚠ {item.code} 超过 480s 超时，跳过", fg="yellow")
+        r = by_code.get(item.code)
+        if not r:
+            failures += 1
+            continue
+        if r["status"] == "timeout":
             timeouts += 1
             continue
-        except Exception as e:
-            click.secho(f"  ⚠ {item.code} 出错：{e}", fg="yellow")
+        if r["status"] != "ok":
             failures += 1
             continue
-        # 解析评级 / 得分 / 安全边际 / 行动建议
-        out_text = proc.stdout
-        rating_m = re.search(r"评级：(\S+)\s+得分\s+(\d+)/100\s+安全边际：(\S+)", out_text)
-        action_m = re.search(r"行动建议：(.+)", out_text)
-        if not rating_m:
-            failures += 1
-            continue
-        new_rating = rating_m.group(1)
-        new_score = int(rating_m.group(2))
-        new_margin = rating_m.group(3)
-        new_action = action_m.group(1).strip() if action_m else "—"
-        # 检测变化
-        if item.last_action and item.last_action != new_action:
-            changes.append(f"⚠ {item.code} {item.name or ''} 行动建议：{item.last_action} → {new_action}")
-        elif item.last_score is not None and abs(item.last_score - new_score) >= 5:
-            changes.append(f"⚠ {item.code} {item.name or ''} 得分 ≥5 变化：{item.last_score} → {new_score}")
-        wl.update_result(
-            item.code,
-            rating=new_rating, score=new_score, margin=new_margin,
-            action=new_action, name=item.name,
-        )
+        if item.last_action and item.last_action != r["action"]:
+            changes.append(f"⚠ {item.code} {item.name or ''} 行动：{item.last_action} → {r['action']}")
+        elif item.last_score is not None and abs(item.last_score - r["score"]) >= 5:
+            changes.append(f"⚠ {item.code} {item.name or ''} 得分 ≥5 变化：{item.last_score} → {r['score']}")
+        wl.update_result(item.code,
+                          rating=r["rating"], score=r["score"],
+                          margin=r["margin"], action=r["action"],
+                          name=item.name)
     wl.save()
     if timeouts or failures:
         click.echo(f"\n超时 {timeouts} / 失败 {failures}")
@@ -332,6 +376,17 @@ def watch_run(no_llm: bool, brief: bool, out: Path | None):
             click.secho(f"  {c}", fg="yellow")
     else:
         click.echo("\n\n所有标的评级 / 行动建议无显著变化。")
+
+
+def _print_subprocess_result(r: dict) -> None:
+    if r["status"] == "timeout":
+        click.secho(f"  ⚠ {r['code']} 超过 480s 超时", fg="yellow")
+    elif r["status"] == "error":
+        click.secho(f"  ⚠ {r['code']} 错误：{r.get('error')}", fg="yellow")
+    elif r["status"] == "parse_fail":
+        click.secho(f"  ⚠ {r['code']} 解析评级失败", fg="yellow")
+    else:
+        click.echo(f"  ✓ {r['rating']}  {r['score']}/100  {r['margin']}  {r['action'][:50]}")
 
 
 # ============================================================================
@@ -523,6 +578,146 @@ def _add_results_to_watchlist(rows) -> None:
             added += 1
     wl.save()
     click.secho(f"✓ 加入 watchlist {added} 只（重复的跳过）", fg="green")
+
+
+# ============================================================================
+# portfolio 子命令组（v0.12 #56）
+# ============================================================================
+
+@cli.group()
+def portfolio():
+    """持仓组合视角：加权指标、行业集中度、卖出信号汇总。"""
+    pass
+
+
+@portfolio.command("summary")
+@click.option("--no-llm", is_flag=True, help="跳过 LLM（默认启用以省时间）")
+@click.option("--refresh", is_flag=True,
+              help="强制重新拉取每只股票（默认用缓存）")
+def portfolio_summary(no_llm: bool, refresh: bool):
+    """根据 watchlist 持仓信息（buy_price + shares）汇总组合视角。
+
+    输出：组合成本 / 当前市值 / 总浮盈 / 加权 ROE/PE/股息率 / 行业集中度 /
+          卖出信号热力（多少持仓触发 high/medium）/ 评级分布。
+    """
+    wl = Watchlist.load()
+    holdings = [i for i in wl.items if i.buy_price and i.shares]
+    if not holdings:
+        click.secho("watchlist 中没有持仓记录（需 buy_price + shares）。"
+                    "用 `watch add CODE --price X --shares Y` 添加。", fg="yellow")
+        return
+
+    click.echo(f"[portfolio summary] {len(holdings)} 只持仓，拉取数据中…")
+
+    snapshots = []
+    for h in holdings:
+        try:
+            sid = parse_code(h.code, hint_hk=(h.market == "HK"))
+            snap = fetch(sid, validate=False, governance=False, holders=False)
+            result = score(snap)
+            snapshots.append((h, snap, result))
+            click.echo(f"  ✓ {h.code} {snap.profile.name} 当前 "
+                       f"{snap.profile.currency}{snap.profile.current_price:.2f}")
+        except Exception as e:
+            click.secho(f"  ⚠ {h.code} 失败：{e}", fg="yellow")
+
+    if not snapshots:
+        click.secho("无可用快照", fg="red")
+        return
+
+    # 持仓汇总
+    total_cost = 0.0
+    total_mkt = 0.0
+    weighted_roe = 0.0
+    weighted_pe = 0.0
+    weighted_div = 0.0
+    industry_weights: dict[str, float] = {}
+    rating_counts: dict[str, int] = {}
+    high_signals = 0
+    medium_signals = 0
+    pnl_rows = []
+
+    for h, snap, result in snapshots:
+        cost = h.buy_price * h.shares
+        cur_price = snap.profile.current_price or h.buy_price
+        mkt = cur_price * h.shares
+        total_cost += cost
+        total_mkt += mkt
+        # 加权
+        roes = [p.roe for p in snap.financials.annual[:5] if p.roe is not None]
+        roe5 = sum(roes) / len(roes) if roes else 0
+        pe = snap.valuation.pe_ttm or 0
+        div_y = 0
+        if snap.dividends.ttm_per_10_shares and cur_price:
+            div_y = (snap.dividends.ttm_per_10_shares / 10) / cur_price * 100
+        weighted_roe += roe5 * mkt
+        weighted_pe += pe * mkt
+        weighted_div += div_y * mkt
+        ind = snap.profile.industry or "未知"
+        industry_weights[ind] = industry_weights.get(ind, 0) + mkt
+        rating_counts[result.rating] = rating_counts.get(result.rating, 0) + 1
+        for s in result.sell_signals:
+            if s.severity == "high":
+                high_signals += 1
+            elif s.severity == "medium":
+                medium_signals += 1
+        pnl = (cur_price - h.buy_price) / h.buy_price * 100
+        pnl_rows.append({
+            "code": h.code, "name": snap.profile.name,
+            "shares": h.shares, "buy": h.buy_price, "cur": cur_price,
+            "cost": cost, "mkt": mkt, "pnl_pct": pnl,
+            "rating": result.rating, "action": result.action,
+            "signals": len(result.sell_signals),
+        })
+
+    # 输出
+    click.echo()
+    click.echo("=" * 95)
+    click.secho("📊 组合总览", fg="cyan", bold=True)
+    click.echo("=" * 95)
+    click.echo(f"持仓数：{len(snapshots)} 只")
+    click.echo(f"总成本：¥{total_cost:,.0f}")
+    click.echo(f"总市值：¥{total_mkt:,.0f}")
+    pnl_total = total_mkt - total_cost
+    pnl_pct = pnl_total / total_cost * 100 if total_cost else 0
+    color = "green" if pnl_total >= 0 else "red"
+    click.secho(f"浮盈：¥{pnl_total:+,.0f}（{pnl_pct:+.1f}%）", fg=color, bold=True)
+    click.echo()
+    click.echo(f"加权 5y ROE：{weighted_roe / total_mkt:.1f}%")
+    click.echo(f"加权 PE(TTM)：{weighted_pe / total_mkt:.1f}")
+    click.echo(f"加权 股息率：{weighted_div / total_mkt:.2f}%")
+
+    click.echo()
+    click.secho("📌 行业集中度", fg="cyan")
+    for ind, w in sorted(industry_weights.items(), key=lambda x: -x[1]):
+        pct = w / total_mkt * 100
+        bar = "█" * int(pct / 2)
+        click.echo(f"  {ind[:18]:<20} {pct:>5.1f}% {bar}")
+        if pct > 30:
+            click.secho(f"    ⚠ 单行业 > 30%，集中风险偏高", fg="yellow")
+
+    click.echo()
+    click.secho("⚠ 卖出信号热力", fg="cyan")
+    click.echo(f"  🔴 high severity: {high_signals} 条")
+    click.echo(f"  🟡 medium severity: {medium_signals} 条")
+
+    click.echo()
+    click.secho("🏷 评级分布", fg="cyan")
+    for r, n in sorted(rating_counts.items(), key=lambda x: -x[1]):
+        click.echo(f"  {r:<18} {n} 只")
+
+    click.echo()
+    click.secho("💼 单股浮盈明细（按浮盈率降序）", fg="cyan")
+    click.echo(f"{'代码':<8} {'名称':<12} {'股数':>6} {'买入价':>8} {'当前价':>8} "
+               f"{'浮盈%':>8} {'评级':<14} {'信号':>5}")
+    click.echo("-" * 95)
+    for r in sorted(pnl_rows, key=lambda x: -x["pnl_pct"]):
+        c = "green" if r["pnl_pct"] >= 0 else "red"
+        signal_str = f"{r['signals']}" if r["signals"] else "—"
+        click.secho(f"{r['code']:<8} {r['name'][:10]:<12} {r['shares']:>6} "
+                    f"{r['buy']:>8.2f} {r['cur']:>8.2f} {r['pnl_pct']:>+7.1f}% "
+                    f"{r['rating'][:12]:<14} {signal_str:>5}",
+                    fg=c if abs(r['pnl_pct']) > 5 else None)
 
 
 # ============================================================================
