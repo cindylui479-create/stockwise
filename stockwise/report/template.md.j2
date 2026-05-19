@@ -86,26 +86,28 @@
 
 > 数据源：同花顺行业指数 5 年收盘价分位（PE 数据接口不可用，用价格分位作 proxy）。
 
-{% if snap_industry_roe and not snap_industry_roe.skipped and snap_industry_roe.percentile is not none -%}
+{% elif snap_industry_cycle is defined and snap_industry_cycle and snap_industry_cycle.skipped -%}
+*行业 "{{ snap_industry_cycle.industry }}" 暂未启用周期位置（仅周期/消费/医药/金融行业映射，详见 industry_cycle._INDUSTRY_MAP）。*
+{% else -%}
+*未获取行业周期位置。*
+{%- endif %}
+
+{# v0.13.3：行业 ROE 横截面段独立渲染（不再嵌套在 cycle 块内）#}
+{% if snap_industry_roe and not snap_industry_roe.skipped and snap_industry_roe.percentile is not none %}
 **行业 ROE 横截面（5 年均值，{{ snap_industry_roe.peers_sample }} 个同行对照）**：
 
 - 本公司 5y ROE：**{{ "%.1f" | format(snap_industry_roe.company_roe) }}%**
 - 行业均值：{{ "%.1f" | format(snap_industry_roe.peers_avg_roe) }}%（中位 {{ "%.1f" | format(snap_industry_roe.peers_median_roe) }}%）
 - 行业排名：第 **{{ snap_industry_roe.company_rank }}** / {{ snap_industry_roe.peers_sample + 1 }} 名（分位 {{ "%.0f" | format(snap_industry_roe.percentile) }}%）
 
-{% if snap_industry_roe.percentile >= 80 and snap_industry_cycle and snap_industry_cycle.label in ("高位", "中位偏高") -%}
+{% if snap_industry_roe.percentile >= 80 and snap_industry_cycle and not snap_industry_cycle.skipped and snap_industry_cycle.label in ("高位", "中位偏高") -%}
 ⚠ **周期顶部 + ROE 行业前 20%**：可能是"周期顶部高 ROE 假象"，警惕业绩回归。
 {% elif snap_industry_roe.percentile >= 80 -%}
-✅ ROE 在行业 top 20%，且行业景气不在高位 → 个体阿尔法
+✅ ROE 在行业 top 20% → 个体阿尔法明显
 {% elif snap_industry_roe.percentile <= 20 -%}
 ⚠ ROE 在行业 bottom 20%，竞争力弱于同行。
 {%- endif %}
-{%- endif %}
-{% elif snap_industry_cycle is defined and snap_industry_cycle and snap_industry_cycle.skipped -%}
-*行业 "{{ snap_industry_cycle.industry }}" 暂未启用周期位置（仅周期/消费/医药/金融行业映射，详见 industry_cycle._INDUSTRY_MAP）。*
-{% else -%}
-*未获取行业周期位置。*
-{%- endif %}
+{% endif %}
 
 ---
 

@@ -1,7 +1,7 @@
 [project]
 name = "stockwise"
-version = "0.13.2"
-description = "巴菲特/林奇范式 A 股 + 港股价值投资分析工具：Web UI 增删改 + mermaid 浏览器渲染修复"
+version = "0.13.3"
+description = "巴菲特/林奇范式 A 股 + 港股价值投资分析工具：行业 ROE 段独立渲染 + 行业映射扩展（40+ 行业）"
 license = { text = "MIT" }
 requires-python = ">=3.10"
 dependencies = [
